@@ -21,21 +21,27 @@ See [docs/SPEC.md](docs/SPEC.md) for the full design.
 
 - macOS 26 or later
 - An admin account (reading the system log stream requires it)
-- Xcode 26 or later, plus XcodeGen and SwiftLint
+- Xcode 26 or later
+- Node.js, for the duplicate-code check only
 
 ## Build
 
 ```sh
-make bootstrap   # install XcodeGen and SwiftLint (once)
-make check       # lint, test, build
-make open        # generate and open Wyla.xcodeproj
+make bootstrap   # install pinned XcodeGen and SwiftLint into .tools/ and enable the pre-commit hook (once)
+make run         # build and open WYLA
+make check       # format, lint, tests with coverage, duplicate check, analyzer, integration tests
+make help        # every target
 ```
 
-`Wyla.xcodeproj` is generated from `project.yml` and is not committed. Run `make generate` after adding or moving files.
+`Wyla.xcodeproj` is generated from `project.yml` and is not committed. Run `make generate` after adding or moving files, or `make open` to generate and open it in Xcode.
+
+## Releases
+
+Pushing a `v*` tag builds the app and publishes `WYLA-<version>.zip` with a SHA-256 checksum on the [releases page](https://github.com/drawmeanelephant/wyla/releases). Builds are ad-hoc signed and not notarized, so Gatekeeper blocks the first launch. Allow it in System Settings > Privacy & Security.
 
 ## Privacy
 
-Everything stays on your Mac. WYLA makes no network connections and has no telemetry.
+Everything stays on your Mac. WYLA makes no network connections and has no telemetry. [PRIVACY.md](PRIVACY.md) lists what WYLA records and how to delete it, and [docs/RUNBOOK.md](docs/RUNBOOK.md) covers health checks and troubleshooting.
 
 ## License
 

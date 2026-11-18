@@ -4,6 +4,17 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+    labels: [dependencies, area:ci]
     groups:
       actions:
         patterns: ["*"]
+
+  - package-ecosystem: swift
+    directory: /Packages/WylaCore
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    labels: [dependencies, area:core]

@@ -16,12 +16,32 @@ WYLA ("What You Lookin At") is a macOS app that keeps an auditable, local log of
 
 ## Commands
 
-- `make bootstrap`: install XcodeGen and SwiftLint with Homebrew.
+Run `make help` for the full list.
+
+- `make bootstrap`: install the pinned XcodeGen and SwiftLint into `.tools/` (checksums verified, versions in `scripts/tools.env`) and enable the pre-commit hook in `.githooks/`.
 - `make generate`: regenerate `Wyla.xcodeproj`. Run it after adding, removing, or moving files.
+- `make build`: generate the project and build the app. The log is in `build/xcodebuild.log`, followed by a build timing summary.
+- `make run`: build and open the app.
 - `make test`: run the WylaCore tests (`swift test`).
-- `make build`: generate the project and build the app.
+- `make coverage`: run the tests with coverage and xunit reports (`build/test-results/`). Fails below 80% line coverage of `Packages/WylaCore/Sources`.
+- `make format` / `make format-check`: `swift format` with `.swift-format`.
 - `make lint`: SwiftLint in strict mode.
-- `make check`: lint, test, and build. CI runs the same targets.
+- `make duplicates`: jscpd copy-paste detection (3% threshold, `.jscpd.json`). Needs Node.
+- `make analyze`: clean build, then SwiftLint's analyzer rules for unused declarations and imports.
+- `make integration-test`: check the built bundle's layout, the agent's startup, and the app's launch.
+- `make qa`: build, then drive the real app through its menu and window with `scripts/qa-drive.sh`. Needs Accessibility permission for the process that runs it; not run in CI.
+- `make check`: everything CI runs (`format-check lint coverage duplicates analyze integration-test`).
+- `make release-zip VERSION=v0.1.0`: build Release and zip the app into `build/release/`.
+
+## Verifying a change
+
+Run `make check` before opening a pull request. If the change affects the UI, also run `make qa`. The `wyla-verify-change` skill in `.factory/skills/` has the full procedure, and `wyla-log-fixture` covers capturing system log fixtures.
+
+## Environment and secrets
+
+- No environment variables are needed to build, test, or run WYLA, so the repository has no `.env` template.
+- The repository has no secrets. CI uses only the built-in `GITHUB_TOKEN`. Never commit captured logs or databases that contain personal data; scrub fixtures as the `wyla-log-fixture` skill describes.
+- Log personal values (paths that contain a user name, window titles) with `privacy: .private` in `os.Logger`. See `PRIVACY.md`.
 
 ## Rules
 
@@ -35,4 +55,7 @@ WYLA ("What You Lookin At") is a macOS app that keeps an auditable, local log of
 ## Workflow
 
 - Branch from `main`, one branch per issue, and open a pull request that closes the issue.
-- CI must pass before merging. Squash-merge.
+- CI ("Lint, test, build") must pass before merging; `main` is protected and accepts changes only through pull requests. Squash-merge.
+- Label pull requests (`enhancement`, `bug`, `log-format`, `audit`, `chore`) so the generated release notes sort them. Pushing a `v*` tag runs `.github/workflows/release.yml`, which publishes the zipped app with a SHA-256 checksum.
+- CodeQL scans Swift and the workflows on every pull request and weekly.
+- Operational checks and rollback steps are in `docs/RUNBOOK.md`.
