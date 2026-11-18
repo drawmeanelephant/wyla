@@ -22,7 +22,47 @@ WYLA ("What You Lookin At") keeps an auditable, local log of every app that uses
 - `log stream --style ndjson` works from an admin account without root.
 - The system keeps about 25 hours of these lines. Anything older is gone unless WYLA records it.
 - TCC permission checks are high volume: 936 `kTCCServiceScreenCapture` checks in 15 minutes, mostly sent by `replayd` on behalf of an app.
-- The retained window had no camera use, so the `cam:` and `mic:` formats are unconfirmed.
+
+## Findings from the M0 spike (macOS 27.3, build 26C5035r)
+
+Captured with `scripts/capture-sensor-logs.sh` while Photo Booth, Voice Memos, a ⌘⇧5 screen recording, Photo Booth plus FaceTime together, and Photo Booth on Continuity Camera each used a sensor. The scrubbed captures are the fixtures in `Packages/WylaCore/Tests/WylaCoreTests/Fixtures/`.
+
+### Control Center indicator lines
+
+- `Active activity attributions changed to [...]` lists every current activation as `<sensor>:<client>`, with sensor `cam`, `mic`, or `scr` and client a bundle ID or, for command-line tools, an executable name: `["cam:com.apple.PhotoBooth", "cam:com.apple.FaceTime"]`. This is the main source.
+- Two apps on one camera appear as two entries. The array order is not stable (`["cam:com.apple.PhotoBooth", "scr:bash", "cam:com.apple.FaceTime"]`), so compare attribution sets, not arrays.
+- When an activation ends, an Info-level line names it with its display name in clear text: `added to recent: [[cam] Photo Booth (com.apple.PhotoBooth)]`. Command-line clients have empty parentheses: `[[scr] bash ()]`. This is the only public source of display names.
+- Other lines in the category (`SystemStatus attributed attribution to ...`, `Sorted active attributions from SystemStatus update: ...`, `Recent activity attributions changed to ...`, popover pause and resume) repeat the same information or are unrelated. The parser can ignore them.
+- A ⌘⇧5 screen recording is attributed to `com.apple.systemuiserver`, display name "Screenshot".
+- With Photo Booth and FaceTime both open, each app's attribution dropped and returned while the camera stayed on: Photo Booth had gaps of 1.9 s and 8.0 s, and FaceTime a gap of 6.8 s. The 2 s merge window joins the short gap only, so the timeline shows those as separate activations.
+- A command-line client (`scr:bash`, see TCC below) produced 14 screen-capture activations in about 3 minutes, each lasting 18 to 48 ms.
+- `log stream` writes a `Filtering the log data using ...` banner to stdout before the first event. The parser must skip non-JSON lines.
+
+### Camera and microphone hardware
+
+- A command-line process with no camera or microphone permission read `kCMIODevicePropertyDeviceIsRunningSomewhere` and `kAudioDevicePropertyDeviceIsRunningSomewhere` for every device without a prompt. TCC logged no camera check for it. `coreaudiod` preflighted microphone access for it and got authValue 1 (not granted), and the property still worked.
+- Devices listed: MacBook Pro Camera, MacBook Pro Desk View Camera, MacBook Pro Microphone, and, through Continuity, iPhone Camera, iPhone Desk View Camera, and iPhone Microphone.
+- The hardware state changed 66 to 344 ms after the matching attribution, on and off, measured with a 250 ms poll. The 3 s unattributed-use window has ample margin.
+
+### TCC access lines
+
+- `AUTHREQ_ATTRIBUTION` names the `responsible`, `accessing`, and `requesting` processes with identifier, pid, and binary path in clear text. `AUTHREQ_CTX` gives the service and `AUTHREQ_RESULT` the result, joined by `msgID`.
+- This resolves command-line clients: the `scr:bash` activations came from a `VMRunner` executable whose responsible app was `com.electron.factory`, checked by `replayd` about 80 ms before each indicator change. WYLA can attribute such sessions to the responsible app.
+- Binary paths can contain a user name or project names. Store them, but log them as private and scrub them from fixtures.
+- Volume: 11,211 lines in 206 s across all services, including 113 screen-capture, 11 microphone, 6 audio-capture, and 3 camera requests.
+
+### Continuity Camera
+
+Captured separately (the `-continuity-` fixtures): Photo Booth switched from the built-in camera to iPhone Camera.
+
+- The indicator line does not change. It stays `cam:com.apple.PhotoBooth` and names no device.
+- Switching cameras ended the activation and started a new one 56 ms later. The merge window joins them.
+- The hardware state shows the switch: MacBook Pro Camera turned off and iPhone Camera turned on in the same 250 ms poll. The device name for a session must come from the hardware listener.
+- TCC logged a camera check for Photo Booth whose requesting process was `com.apple.cmio.ContinuityCaptureAgent`. This marks the session as Continuity Camera.
+
+### CPU cost
+
+Over 206 s: the indicator stream used 0.03 s of CPU (under 0.1%), the TCC Info-level stream 0.65 s (0.3% average, 1.1% peak sample), and the 4 Hz hardware poll 0.22 s (0.1%). This excludes `logd`'s own work. The listeners in M4 replace polling with property listeners.
 
 ## Architecture
 
@@ -51,7 +91,7 @@ WylaCore (Swift package): models, parsers, session builder, store, hash chain
 
 ## Session rules
 
-- Each attribution set is compared with the previous one. A new (sensor, client) pair starts a session, and a missing pair ends it.
+- Each attribution set is compared with the previous one as a set, because the array order changes. A new (sensor, client) pair starts a session, and a missing pair ends it.
 - Every raw activation is stored. The UI merges activations by the same app on the same sensor that are less than the merge window apart (default 2 s) into one session, and shows both counts.
 - If camera or microphone hardware turns on and no matching attribution arrives within 3 s, WYLA records an unattributed session and flags it.
 - When the agent starts, it closes sessions left open. If the stop is still in the system log, backfill finds it. Otherwise the session ends at the last heartbeat with `end_reason = agent_restart`.
@@ -103,13 +143,17 @@ Tracked as GitHub milestones, with one issue each.
 
 - Log format changes: the Control Center format is undocumented. Fixture tests per macOS version catch this in tests. At runtime, the Health view raises an alarm when hardware is on but no attribution parses.
 - `log stream` requires an admin account. Non-admin users are out of scope for v1.
-- Command-line clients such as `bash` don't identify the real tool. Where TCC or `replayd` lines name the responsible process, WYLA adds it.
+- Command-line clients such as `bash` don't identify the real tool. TCC `AUTHREQ_ATTRIBUTION` lines name the responsible app (confirmed in M0), so WYLA adds it.
 - Prior art: Objective-See's OverSight detects camera and microphone use from logs. Check its license before reusing any code.
 
-## Open questions (answer in M0)
+## Open questions
 
-1. The exact `cam:` and `mic:` token format, and how two apps on one sensor appear.
-2. Whether the CoreMediaIO and CoreAudio "running somewhere" listeners need camera or microphone permission.
-3. Whether TCC `AUTHREQ_ATTRIBUTION` lines name the responsible app in clear text.
-4. CPU cost of the `log stream` child processes (target: under 1% average).
-5. How Continuity Camera and virtual cameras appear in each source.
+Answered in M0 (see "Findings from the M0 spike"):
+
+1. `cam:` and `mic:` use the same `<sensor>:<client>` format as `scr:`. Two apps on one sensor appear as two entries.
+2. The "running somewhere" properties need no camera or microphone permission.
+3. TCC `AUTHREQ_ATTRIBUTION` lines name the responsible app in clear text.
+4. Both `log stream` processes stayed under 1% average CPU.
+5. Continuity Camera keeps the app's `cam:` attribution. The device comes from the hardware listener, and TCC names `ContinuityCaptureAgent`.
+
+Not yet tested: third-party virtual cameras (for example OBS). None were installed for the spike. Check them in M4 if one is in use.

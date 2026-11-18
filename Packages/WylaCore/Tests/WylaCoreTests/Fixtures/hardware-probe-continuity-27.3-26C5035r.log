@@ -1,0 +1,11 @@
+2026-11-18T14:06:07.843-05:00 probe started pid=44684
+2026-11-18T14:06:07.885-05:00 mic 77 MacBook Pro Microphone = off
+2026-11-18T14:06:07.886-05:00 camera 42 iPhone Camera [iPhone15,3] = off
+2026-11-18T14:06:07.886-05:00 camera 35 MacBook Pro Camera [MacBook Pro Camera] = off
+2026-11-18T14:06:07.886-05:00 camera 40 iPhone Desk View Camera [iPhone15,3] = off
+2026-11-18T14:06:07.887-05:00 mic 82 iPhone Microphone = off
+2026-11-18T14:06:07.887-05:00 camera 37 MacBook Pro Desk View Camera [MacBook Pro Desk View Camera] = off
+2026-11-18T14:09:51.162-05:00 camera 35 MacBook Pro Camera [MacBook Pro Camera] = on
+2026-11-18T14:09:55.237-05:00 camera 42 iPhone Camera [iPhone15,3] = on
+2026-11-18T14:09:55.238-05:00 camera 35 MacBook Pro Camera [MacBook Pro Camera] = off
+2026-11-18T14:10:10.460-05:00 camera 42 iPhone Camera [iPhone15,3] = off

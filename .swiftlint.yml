@@ -4,6 +4,7 @@ included:
   - Packages/WylaCore/Package.swift
   - Packages/WylaCore/Sources
   - Packages/WylaCore/Tests
+  - scripts/hwprobe.swift
 excluded:
   - Packages/WylaCore/.build
   - build
