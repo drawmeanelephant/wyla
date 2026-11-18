@@ -1,0 +1,18 @@
+#!/bin/sh
+# Format-checks and lints staged Swift files. Enabled by `make hooks` (part of `make bootstrap`).
+set -eu
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR -- '*.swift')
+[ -n "$staged" ] || exit 0
+
+swiftlint=.tools/swiftlint/swiftlint
+[ -x "$swiftlint" ] || swiftlint=swiftlint
+
+status=0
+printf '%s\n' "$staged" | tr '\n' '\0' | xargs -0 swift format lint --strict || status=1
+printf '%s\n' "$staged" | tr '\n' '\0' | xargs -0 "$swiftlint" lint --strict --quiet --force-exclude || status=1
+
+if [ "$status" -ne 0 ]; then
+    echo "pre-commit: fix the issues above. \`make format\` fixes formatting." >&2
+fi
+exit "$status"

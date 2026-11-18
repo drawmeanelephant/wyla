@@ -9,6 +9,22 @@ DerivedData/
 .build/
 .swiftpm/
 
+# Pinned build tools (make tools)
+.tools/
+
 # Xcode user state
 xcuserdata/
 *.xcuserstate
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Local environment files. WYLA needs none; never commit credentials.
+.env
+.env.*
+!.env.example
+
+# Node tooling (jscpd runs through npx)
+node_modules/

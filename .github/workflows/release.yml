@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: macos-26
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Cache pinned tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tools
+          key: tools-${{ runner.os }}-${{ hashFiles('scripts/tools.env', 'scripts/install-tools.sh') }}
+
+      - name: Test core
+        run: make test
+
+      - name: Build release zip
+        run: make release-zip VERSION="$GITHUB_REF_NAME"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          zip="build/release/WYLA-$GITHUB_REF_NAME.zip"
+          (cd build/release && shasum -a 256 "WYLA-$GITHUB_REF_NAME.zip" > "WYLA-$GITHUB_REF_NAME.zip.sha256")
+          prerelease=()
+          case "$GITHUB_REF_NAME" in *-*) prerelease=(--prerelease) ;; esac
+          gh release create "$GITHUB_REF_NAME" "$zip" "$zip.sha256" \
+            --verify-tag --generate-notes --title "WYLA $GITHUB_REF_NAME" "${prerelease[@]}"

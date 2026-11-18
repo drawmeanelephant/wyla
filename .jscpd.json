@@ -1,0 +1,10 @@
+{
+  "path": ["App", "Agent", "Packages/WylaCore/Sources", "Packages/WylaCore/Tests"],
+  "format": ["swift"],
+  "ignore": ["**/.build/**"],
+  "gitignore": true,
+  "minTokens": 50,
+  "minLines": 5,
+  "threshold": 3,
+  "reporters": ["console"]
+}

@@ -1,0 +1,15 @@
+# Categories for GitHub's generated release notes, keyed on pull request labels.
+changelog:
+  exclude:
+    labels: [chore, dependencies]
+  categories:
+    - title: Log format changes
+      labels: [log-format]
+    - title: Features
+      labels: [enhancement]
+    - title: Fixes
+      labels: [bug]
+    - title: Security and audit
+      labels: [audit, security]
+    - title: Other changes
+      labels: ["*"]
