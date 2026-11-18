@@ -35,7 +35,7 @@ Captured with `scripts/capture-sensor-logs.sh` while Photo Booth, Voice Memos, a
 - Other lines in the category (`SystemStatus attributed attribution to ...`, `Sorted active attributions from SystemStatus update: ...`, `Recent activity attributions changed to ...`, popover pause and resume) repeat the same information or are unrelated. The parser can ignore them.
 - A ⌘⇧5 screen recording is attributed to `com.apple.systemuiserver`, display name "Screenshot".
 - With Photo Booth and FaceTime both open, each app's attribution dropped and returned while the camera stayed on: Photo Booth had gaps of 1.9 s and 8.0 s, and FaceTime a gap of 6.8 s. The 2 s merge window joins the short gap only, so the timeline shows those as separate activations.
-- A command-line client (`scr:bash`, see TCC below) produced 14 screen-capture activations in about 3 minutes, each lasting 18 to 48 ms.
+- A command-line client (`scr:bash`, see TCC below) produced 16 screen-capture activations in about 3 minutes, each lasting 18 to 48 ms.
 - `log stream` writes a `Filtering the log data using ...` banner to stdout before the first event. The parser must skip non-JSON lines.
 
 ### Camera and microphone hardware
@@ -93,8 +93,11 @@ WylaCore (Swift package): models, parsers, session builder, store, hash chain
 
 - Each attribution set is compared with the previous one as a set, because the array order changes. A new (sensor, client) pair starts a session, and a missing pair ends it.
 - Every raw activation is stored. The UI merges activations by the same app on the same sensor that are less than the merge window apart (default 2 s) into one session, and shows both counts.
-- If camera or microphone hardware turns on and no matching attribution arrives within 3 s, WYLA records an unattributed session and flags it.
-- When the agent starts, it closes sessions left open. If the stop is still in the system log, backfill finds it. Otherwise the session ends at the last heartbeat with `end_reason = agent_restart`.
+- Camera or microphone hardware that runs while no attributed activation of that sensor is open is uncovered. Uncovered time becomes an unattributed activation, starting when it began, once it lasts 3 s, or at once if the hardware turns off before any attribution arrives. Uncovered time after an attributed activation that ends with the hardware turning off within 3 s is the normal shutdown lag (up to 344 ms in M0) and records nothing.
+- An activation's device is the device of its sensor that ran longest during it. A merged session lists every device its activations used.
+- A command-line client (an executable name, which has no dot) is linked to the responsible app of the latest TCC request for the same sensor in the 0.5 s before it started. Requests whose responsible app is already attributed are skipped.
+- When the agent starts, it closes sessions left open. If the stop is still in the system log, backfill finds it. Otherwise the session ends at the last heartbeat, or at its start if it began after that heartbeat, with `end_reason = agent_restart`.
+- `WylaCore` implements these rules: `IndicatorParser` and `TCCRequestAssembler` parse the log lines, `SessionBuilder` produces activations, and `SessionMerger` joins them into sessions.
 
 ## Data model (SQLite through GRDB)
 
