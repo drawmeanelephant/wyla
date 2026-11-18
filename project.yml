@@ -1,0 +1,57 @@
+name: Wyla
+options:
+  bundleIdPrefix: io.github.drawmeanelephant
+  deploymentTarget:
+    macOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_HARDENED_RUNTIME: YES
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    DEAD_CODE_STRIPPING: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+packages:
+  WylaCore:
+    path: Packages/WylaCore
+targets:
+  Wyla:
+    type: application
+    platform: macOS
+    sources:
+      - path: App
+      - path: Support/LaunchAgents/io.github.drawmeanelephant.wyla.agent.plist
+        buildPhase:
+          copyFiles:
+            destination: wrapper
+            subpath: Contents/Library/LaunchAgents
+    dependencies:
+      - package: WylaCore
+      - target: WylaAgent
+        embed: true
+        copy:
+          destination: executables
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.drawmeanelephant.wyla
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: WYLA
+        INFOPLIST_KEY_LSUIElement: YES
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
+    scheme: {}
+  WylaAgent:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Agent
+    dependencies:
+      - package: WylaCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.drawmeanelephant.wyla.agent
+        GENERATE_INFOPLIST_FILE: YES
+        CREATE_INFOPLIST_SECTION_IN_BINARY: YES
+        SKIP_INSTALL: YES

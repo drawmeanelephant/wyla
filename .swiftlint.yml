@@ -1,0 +1,20 @@
+included:
+  - App
+  - Agent
+  - Packages/WylaCore/Sources
+  - Packages/WylaCore/Tests
+excluded:
+  - Packages/WylaCore/.build
+  - build
+opt_in_rules:
+  - contains_over_first_not_nil
+  - empty_count
+  - explicit_init
+  - first_where
+  - force_unwrapping
+  - redundant_nil_coalescing
+  - sorted_first_last
+  - toggle_bool
+line_length:
+  warning: 140
+  error: 200

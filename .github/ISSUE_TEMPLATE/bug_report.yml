@@ -1,0 +1,35 @@
+name: Bug report
+description: WYLA logged something wrong, missed an activation, or crashed.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Include the app, the sensor (camera, microphone, or screen), and roughly when it happened.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and build
+      description: Output of `sw_vers`.
+      placeholder: 27.3 (26C5035r)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: WYLA version or commit
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: Redact anything you don't want in the issue.
+      render: text

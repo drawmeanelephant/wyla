@@ -1,0 +1,40 @@
+name: macOS log format change
+description: A macOS update changed a system log line that WYLA parses.
+labels: [log-format]
+body:
+  - type: markdown
+    attributes:
+      value: WYLA parses undocumented system log lines. Use this form when a macOS update breaks parsing, or when the Health view reports unparsed lines.
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and build
+      description: Output of `sw_vers`.
+      placeholder: 27.3 (26C5035r)
+    validations:
+      required: true
+  - type: dropdown
+    id: source
+    attributes:
+      label: Log source
+      options:
+        - Control Center sensor-indicators
+        - TCC access
+        - CoreMediaIO
+        - CoreAudio
+        - replayd
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: samples
+    attributes:
+      label: Sample lines
+      description: Lines from `log show --style ndjson` for the same activity. Redact app names if needed.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
