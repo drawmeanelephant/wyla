@@ -42,7 +42,7 @@ log stream --style compact --predicate 'subsystem == "io.github.drawmeanelephant
 ### Activity is missing from the log
 
 1. Check that the agent was running at that time. WYLA records monitoring gaps from M3, and the viewer shows them.
-2. A macOS update can change the system log lines that WYLA reads. Run the collector against a fresh capture (see `docs/SPEC.md`, "Findings from the first probe") and open a "Log format change" issue with the capture.
+2. A macOS update can change the system log lines that WYLA reads. Record a fresh capture with `scripts/capture-sensor-logs.sh` while you use each sensor, compare it with the fixtures and `docs/SPEC.md` ("Findings from the M0 spike"), and open a "Log format change" issue. Scrub personal data from anything you attach.
 
 ### The build or a check fails
 
