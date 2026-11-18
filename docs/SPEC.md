@@ -25,7 +25,7 @@ WYLA ("What You Lookin At") keeps an auditable, local log of every app that uses
 
 ## Findings from the M0 spike (macOS 27.3, build 26C5035r)
 
-Captured with `scripts/capture-sensor-logs.sh` while Photo Booth, Voice Memos, a ⌘⇧5 screen recording, and Photo Booth plus FaceTime together each used a sensor. The scrubbed captures are the fixtures in `Packages/WylaCore/Tests/WylaCoreTests/Fixtures/`.
+Captured with `scripts/capture-sensor-logs.sh` while Photo Booth, Voice Memos, a ⌘⇧5 screen recording, Photo Booth plus FaceTime together, and Photo Booth on Continuity Camera each used a sensor. The scrubbed captures are the fixtures in `Packages/WylaCore/Tests/WylaCoreTests/Fixtures/`.
 
 ### Control Center indicator lines
 
@@ -50,6 +50,15 @@ Captured with `scripts/capture-sensor-logs.sh` while Photo Booth, Voice Memos, a
 - This resolves command-line clients: the `scr:bash` activations came from a `VMRunner` executable whose responsible app was `com.electron.factory`, checked by `replayd` about 80 ms before each indicator change. WYLA can attribute such sessions to the responsible app.
 - Binary paths can contain a user name or project names. Store them, but log them as private and scrub them from fixtures.
 - Volume: 11,211 lines in 206 s across all services, including 113 screen-capture, 11 microphone, 6 audio-capture, and 3 camera requests.
+
+### Continuity Camera
+
+Captured separately (the `-continuity-` fixtures): Photo Booth switched from the built-in camera to iPhone Camera.
+
+- The indicator line does not change. It stays `cam:com.apple.PhotoBooth` and names no device.
+- Switching cameras ended the activation and started a new one 56 ms later. The merge window joins them.
+- The hardware state shows the switch: MacBook Pro Camera turned off and iPhone Camera turned on in the same 250 ms poll. The device name for a session must come from the hardware listener.
+- TCC logged a camera check for Photo Booth whose requesting process was `com.apple.cmio.ContinuityCaptureAgent`. This marks the session as Continuity Camera.
 
 ### CPU cost
 
@@ -145,7 +154,6 @@ Answered in M0 (see "Findings from the M0 spike"):
 2. The "running somewhere" properties need no camera or microphone permission.
 3. TCC `AUTHREQ_ATTRIBUTION` lines name the responsible app in clear text.
 4. Both `log stream` processes stayed under 1% average CPU.
+5. Continuity Camera keeps the app's `cam:` attribution. The device comes from the hardware listener, and TCC names `ContinuityCaptureAgent`.
 
-Still open:
-
-5. How Continuity Camera and virtual cameras appear in the indicator and TCC lines. The iPhone devices are visible to CoreMediaIO and CoreAudio, but the spike did not use them. Capture this before M4.
+Not yet tested: third-party virtual cameras (for example OBS). None were installed for the spike. Check them in M4 if one is in use.
