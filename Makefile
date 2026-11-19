@@ -102,7 +102,11 @@ install: generate ## Build Release, copy WYLA into /Applications, and open it
 		mv /Applications/.Wyla-previous.app /Applications/Wyla.app 2>/dev/null || true; \
 		exit 1; \
 	fi
-	codesign --verify --deep --strict /Applications/Wyla.app
+	if ! codesign --verify --deep --strict /Applications/Wyla.app; then \
+		rm -rf /Applications/Wyla.app; \
+		mv /Applications/.Wyla-previous.app /Applications/Wyla.app 2>/dev/null || true; \
+		exit 1; \
+	fi
 	rm -rf /Applications/.Wyla-previous.app
 	open /Applications/Wyla.app
 
