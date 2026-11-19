@@ -14,16 +14,40 @@ enum Schema {
         migrator.registerMigration("v3") { db in
             try db.execute(sql: version3)
         }
+        migrator.registerMigration("v4", migrate: version4)
         return migrator
+    }
+
+    /// Databases that ran v3 before `dedup_id` was added (the first pushed revision of this
+    /// branch) get the column here; a database that ran the final v3 skips the rebuild.
+    /// Old rows have no stored entryID, so their dedup id stays the wall time.
+    private static func version4(_ db: Database) throws {
+        guard !(try db.columns(in: "tcc_requests").contains { $0.name == "dedup_id" }) else { return }
+        try db.execute(
+            sql: """
+                CREATE TABLE tcc_requests_new (
+                    message_id TEXT NOT NULL,
+                    dedup_id TEXT NOT NULL,
+                    time_us INTEGER NOT NULL,
+                    raw_event_id INTEGER REFERENCES raw_events(id),
+                    PRIMARY KEY (message_id, dedup_id)
+                ) WITHOUT ROWID;
+                INSERT INTO tcc_requests_new (message_id, dedup_id, time_us, raw_event_id)
+                    SELECT message_id, CAST(time_us AS TEXT), time_us, raw_event_id FROM tcc_requests;
+                DROP TABLE tcc_requests;
+                ALTER TABLE tcc_requests_new RENAME TO tcc_requests;
+                """)
     }
 
     /// Every completed TCC request, deduplicated on (message_id, dedup_id): `dedup_id` is the
     /// CTX entry's mach time — `log stream` and `log show` report the same entry ~1 ms apart in
     /// wall time but identical mach time — falling back to the request's wall time when the
-    /// entry carried no id. `raw_event_id` is NULL until the request links an activation to its
-    /// responsible app — only linking requests join the hash chain; the rest exist here only as
-    /// dedup rows feeding `tcc_requests_agg`. Existing request events backfill the table: their
-    /// stored JSON carries the messageID and `time` (JSONEncoder's seconds since 2001).
+    /// entry carried no id. Replays claim wall-time-keyed rows left by versions that predated
+    /// entryIDs (see `Recorder.count`), so they aren't counted again. `raw_event_id` is NULL
+    /// until the request links an activation to its responsible app — only linking requests
+    /// join the hash chain; the rest exist here only as dedup rows feeding `tcc_requests_agg`.
+    /// Existing request events backfill the table: their stored JSON carries the messageID and
+    /// `time` (JSONEncoder's seconds since 2001).
     private static let version3 = """
         CREATE TABLE tcc_requests (
             message_id TEXT NOT NULL,
