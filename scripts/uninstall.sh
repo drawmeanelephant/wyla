@@ -37,7 +37,16 @@ launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 # Unregister through the app's own bundle while it still exists; SMAppService would keep the
 # registration for a deleted bundle, and a fresh install would then be stuck off.
 if [ -x "$APP/Contents/MacOS/Wyla" ]; then
-    "$APP/Contents/MacOS/Wyla" --unregister-agent >/dev/null 2>&1 || true
+    # A build without --unregister-agent support opens the app and never returns, so
+    # bound the wait; such an install may keep a stale registration either way.
+    "$APP/Contents/MacOS/Wyla" --unregister-agent >/dev/null 2>&1 &
+    unreg_pid=$!
+    for _ in 1 2 3 4 5; do
+        kill -0 "$unreg_pid" 2>/dev/null || break
+        sleep 1
+    done
+    kill "$unreg_pid" 2>/dev/null || true
+    wait "$unreg_pid" 2>/dev/null || true
 fi
 rm -rf "$APP"
 
