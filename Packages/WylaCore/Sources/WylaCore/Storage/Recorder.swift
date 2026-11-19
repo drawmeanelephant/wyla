@@ -8,12 +8,16 @@ public enum RecorderInput: Sendable, Equatable {
     /// A completed TCC access check. Every request is counted in `tcc_requests_agg`; only one
     /// that links an activation to its responsible app also joins the hash chain as a raw event.
     case tccRequest(TCCRequest)
+    /// A TCC log line that looked like a request but didn't match a known format. Counted for
+    /// the Health view, not stored in the chain.
+    case unparsedTCC(LogEvent)
     case hardware(HardwareChange)
 
     public var time: Date {
         switch self {
         case .indicator(let event): event.timestamp
         case .tccRequest(let request): request.time
+        case .unparsedTCC(let event): event.timestamp
         case .hardware(let change): change.time
         }
     }
@@ -102,10 +106,15 @@ public final class Recorder {
             let raw = RawInput(source: .indicator, time: time, identity: event.entryID, message: event.message)
             switch parser.parse(event.message) {
             case .ignored: return []
-            // Unparsed lines are kept for the Health view and for audit.
-            case .unparsed: return try apply(raw, nil, at: time)
+            // Unparsed lines are kept for the Health view and for audit, and counted in
+            // `unparsed_lines` so the count doesn't re-parse every stored line.
+            case .unparsed:
+                return try apply(raw, nil, at: time) { db in try Self.countUnparsed(.indicator, in: db) }
             case .event(let indicator): return try apply(raw, .indicator(indicator, time: time), at: time)
             }
+        case .unparsedTCC:
+            checkpoints[.tcc] = max(checkpoints[.tcc] ?? time, time)
+            return try apply(nil, nil, at: time) { db in try Self.countUnparsed(.tcc, in: db) }
         case .tccRequest(let request):
             checkpoints[.tcc] = max(checkpoints[.tcc] ?? time, time)
             // Requests are counted, not chained: `tcc_requests` dedups them by (messageID,
@@ -344,5 +353,28 @@ extension HardwareChange {
         let words = message.split(separator: " ", omittingEmptySubsequences: false)
         guard words.count >= 3, let sensor = Sensor(rawValue: String(words[0])), ["on", "off"].contains(words.last) else { return nil }
         self.init(time: time, sensor: sensor, device: words.dropFirst().dropLast().joined(separator: " "), isRunning: words.last == "on")
+    }
+}
+
+extension Recorder {
+
+    /// Marks this run as ended by the agent itself, so a gap to the next run's start is a
+    /// restart, not lost coverage. Called from `stop`; a crashed run's flag stays unset.
+    public func markRunEndedCleanly() throws {
+        try write { db in
+            try db.execute(
+                sql: "UPDATE coverage SET ended_cleanly = 1 WHERE id = ?", arguments: [runID])
+        }
+    }
+
+    /// Increments `unparsed_lines` for the source; the Health view reads it instead of
+    /// re-parsing every stored line.
+    private static func countUnparsed(_ source: RawEventSource, in db: Database) throws {
+        try db.execute(
+            sql: """
+                INSERT INTO unparsed_lines (source, count) VALUES (?, 1)
+                ON CONFLICT (source) DO UPDATE SET count = count + 1
+                """,
+            arguments: [source.rawValue])
     }
 }

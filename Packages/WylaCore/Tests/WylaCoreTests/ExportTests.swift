@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import GRDB
 import Testing
@@ -42,21 +43,65 @@ private func recorded() throws -> (TemporaryStore, URL) {
     #expect(try AuditExport.verify(directory: directory).isIntact)
 }
 
+/// Rewrites `raw_events.json` in `directory` after `edit` changes the rows, then updates
+/// `manifest.json` to the edited count and head — the forgery a tamperer must produce.
+private func rewriteExport(
+    in directory: URL, rows edit: (inout [ExportedRow]) -> Void
+) throws {
+    var rows = try JSONDecoder().decode(
+        [ExportedRow].self, from: Data(contentsOf: directory.appending(path: "raw_events.json")))
+    edit(&rows)
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    encoder.dateEncodingStrategy = .iso8601
+    try encoder.encode(rows).write(to: directory.appending(path: "raw_events.json"))
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    var manifest = try decoder.decode(
+        ExportManifest.self, from: Data(contentsOf: directory.appending(path: "manifest.json")))
+    manifest = ExportManifest(
+        exportedAt: manifest.exportedAt, from: manifest.from, end: manifest.end,
+        head: rows.last.map { ChainAnchor(id: $0.id, hash: $0.hash) }, rowCount: rows.count,
+        sessionCount: manifest.sessionCount)
+    try encoder.encode(manifest).write(to: directory.appending(path: "manifest.json"))
+}
+
+/// Re-links `rows` after rows were deleted: the row after a removed one chains to the row
+/// before it, and every hash from there on is recomputed — a consistent chain with a gap.
+/// The SHA-256 of a chain row, per the format in docs/SPEC.md (the hash builder itself is
+/// internal to WylaCore, so the test recomputes it).
+private func forgeHash(_ row: ExportedRow, prevHash: String) -> String {
+    let text = "\(row.id)\n\(row.timeMicros)\n\(row.source)\n\(row.dedupKey)\n\(prevHash)\n\(row.message)"
+    return SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+}
+
+private func relink(_ rows: inout [ExportedRow]) {
+    var previous: ChainAnchor?
+    for index in rows.indices {
+        let prevHash = previous?.hash ?? String(repeating: "0", count: 64)
+        let row = rows[index]
+        let hash = forgeHash(row, prevHash: prevHash)
+        rows[index] = ExportedRow(
+            id: row.id, timeMicros: row.timeMicros, source: row.source, dedupKey: row.dedupKey,
+            prevHash: prevHash, hash: hash, message: row.message)
+        previous = ChainAnchor(id: row.id, hash: hash)
+    }
+}
+
 @Test func anEditedExportedRowIsFlagged() throws {
     let (temporary, directory) = try recorded()
     try AuditExport.write(store: temporary.store, from: .distantPast, to: .distantFuture, to: directory)
 
-    var rows = try JSONDecoder().decode(
-        [ExportedRow].self, from: Data(contentsOf: directory.appending(path: "raw_events.json")))
-    rows[10] = ExportedRow(
-        id: rows[10].id, timeMicros: rows[10].timeMicros, source: rows[10].source, dedupKey: rows[10].dedupKey,
-        prevHash: rows[10].prevHash, hash: rows[10].hash, message: rows[10].message + " tampered")
-    let encoder = JSONEncoder()
-    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-    try encoder.encode(rows).write(to: directory.appending(path: "raw_events.json"))
+    var editedID: Int64 = 0
+    try rewriteExport(in: directory) { rows in
+        rows[10] = ExportedRow(
+            id: rows[10].id, timeMicros: rows[10].timeMicros, source: rows[10].source, dedupKey: rows[10].dedupKey,
+            prevHash: rows[10].prevHash, hash: rows[10].hash, message: rows[10].message + " tampered")
+        editedID = rows[10].id
+    }
 
     let report = try AuditExport.verify(directory: directory)
-    #expect(report.problem == .hashMismatch(id: rows[10].id))
+    #expect(report.problem == .hashMismatch(id: editedID))
     #expect(!report.isIntact)
 }
 
@@ -64,15 +109,58 @@ private func recorded() throws -> (TemporaryStore, URL) {
     let (temporary, directory) = try recorded()
     try AuditExport.write(store: temporary.store, from: .distantPast, to: .distantFuture, to: directory)
 
-    var rows = try JSONDecoder().decode(
-        [ExportedRow].self, from: Data(contentsOf: directory.appending(path: "raw_events.json")))
-    rows.remove(at: 10)
-    let encoder = JSONEncoder()
-    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-    try encoder.encode(rows).write(to: directory.appending(path: "raw_events.json"))
+    try rewriteExport(in: directory) { $0.remove(at: 10) }
 
     let report = try AuditExport.verify(directory: directory)
     #expect(report.problem != nil || report.headMismatch)
+    #expect(!report.isIntact)
+}
+
+@Test func aRelinkedMiddleGapIsFlagged() throws {
+    let (temporary, directory) = try recorded()
+    try AuditExport.write(store: temporary.store, from: .distantPast, to: .distantFuture, to: directory)
+
+    var after: Int64 = 0
+    var next: Int64 = 0
+    try rewriteExport(in: directory) { rows in
+        after = rows[9].id
+        next = rows[11].id
+        rows.remove(at: 10)
+        relink(&rows)
+    }
+
+    let report = try AuditExport.verify(directory: directory)
+    #expect(report.problem == .missingRows(after: after, next: next))
+    #expect(!report.isIntact)
+}
+
+@Test func aDeletedTailWithAnEditedManifestIsFlaggedByTheAnchor() throws {
+    let (temporary, directory) = try recorded()
+    try AuditExport.write(store: temporary.store, from: .distantPast, to: .distantFuture, to: directory)
+    let head = try #require(try temporary.store.head())
+    // A day inside the exported range anchors the last row; the day names are arbitrary here
+    // because the export covers all days.
+    let anchors = [("2000-01-01", head), ("2999-01-01", head)]
+
+    try rewriteExport(in: directory) { $0.removeLast() }
+
+    let report = try AuditExport.verify(directory: directory, anchors: anchors)
+    #expect(report.problem == .anchorMismatch(head))
+    #expect(!report.isIntact)
+}
+
+@Test func aForgedFirstRowIsFlagged() throws {
+    let (temporary, directory) = try recorded()
+    try AuditExport.write(store: temporary.store, from: .distantPast, to: .distantFuture, to: directory)
+
+    try rewriteExport(in: directory) { rows in
+        rows[0] = ExportedRow(
+            id: rows[0].id, timeMicros: rows[0].timeMicros, source: rows[0].source, dedupKey: rows[0].dedupKey,
+            prevHash: String(repeating: "f", count: 64), hash: rows[0].hash, message: rows[0].message)
+    }
+
+    let report = try AuditExport.verify(directory: directory)
+    #expect(report.problem == .brokenLink(id: 1))
     #expect(!report.isIntact)
 }
 

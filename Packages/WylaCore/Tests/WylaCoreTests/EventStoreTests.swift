@@ -65,7 +65,7 @@ private func sha256(_ text: String) -> String {
         case .indicator(let event):
             if case .ignored = parser.parse(event.message) { false } else { true }
         case .hardware: true
-        case .tccRequest: false
+        case .tccRequest, .unparsedTCC: false
         }
     }.count
     #expect(chainedTCC == linked)
@@ -177,10 +177,10 @@ private func sha256(_ text: String) -> String {
     let unanchored = try temporary.store.verifyIntegrity()
     #expect(unanchored.isIntact)
     #expect(unanchored.head?.id == head.id - 3)
-    let anchored = try temporary.store.verifyIntegrity(anchor: head)
+    let anchored = try temporary.store.verifyIntegrity(anchors: [head])
     #expect(anchored.problem == .anchorMismatch(head))
     #expect(anchored.problem?.firstBadRow == head.id)
-    #expect(try temporary.store.verifyIntegrity(anchor: unanchored.head).isIntact)
+    #expect(try temporary.store.verifyIntegrity(anchors: unanchored.head.map { [$0] } ?? []).isIntact)
 }
 
 @Test func emptyStoreIsIntact() throws {

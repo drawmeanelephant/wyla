@@ -27,12 +27,12 @@ func lockDatabase(at url: URL) {
     }
 }
 
-/// `--verify` checks the hash chain against the latest anchor exported by `anchorExportEnabled`,
+/// `--verify` checks the hash chain against every anchor exported by `anchorExportEnabled`,
 /// prints the result, and exits with status 1 if it is broken.
 func verify(_ url: URL) -> Never {
     do {
-        let anchor = try AnchorLog.earliest(from: AnchorLog.url(near: url))
-        let report = try EventStore(url: url).verifyIntegrity(anchor: anchor)
+        let anchors = try AnchorLog.read(from: AnchorLog.url(near: url)).map(\.anchor)
+        let report = try EventStore(url: url).verifyIntegrity(anchors: anchors)
         if let problem = report.problem {
             print("BROKEN at row \(problem.firstBadRow): \(problem) (\(report.verifiedRows) rows verified before it)")
             exit(EXIT_FAILURE)
@@ -45,24 +45,35 @@ func verify(_ url: URL) -> Never {
     }
 }
 
+/// Parses a `--export` date: `yyyy-MM-dd` (a day in the local timezone) or full ISO 8601.
+private func exportDate(_ argument: String) -> (date: Date, isDay: Bool)? {
+    let day = DateFormatter()
+    day.locale = Locale(identifier: "en_US_POSIX")
+    day.dateFormat = "yyyy-MM-dd"
+    if let date = day.date(from: argument) { return (date, true) }
+    if let date = ISO8601DateFormatter().date(from: argument) { return (date, false) }
+    return nil
+}
+
 /// `--export <from> <to> <directory>` writes the date range's raw events and sessions as CSV and
 /// JSON into the directory, and `--verify-export <directory>` checks such an export's chain.
-/// Dates are ISO 8601 (for example `2026-11-19` or `2026-11-19T12:30:00Z`).
+/// Dates are `yyyy-MM-dd` (days in the local timezone; `to` includes that whole day) or ISO 8601.
 func exportIfAsked(_ url: URL) {
     let arguments = CommandLine.arguments
     if let flag = arguments.firstIndex(of: "--export"), arguments.indices.contains(flag + 3) {
-        let day = DateFormatter()
-        day.dateFormat = "yyyy-MM-dd"
-        let iso = ISO8601DateFormatter()
-        guard let from = day.date(from: arguments[flag + 1]) ?? iso.date(from: arguments[flag + 1]),
-            let end = day.date(from: arguments[flag + 2]) ?? iso.date(from: arguments[flag + 2])
+        guard let from = exportDate(arguments[flag + 1]), let end = exportDate(arguments[flag + 2])
         else {
-            print("ERROR: dates are ISO 8601 (for example 2026-11-19 or 2026-11-19T12:30:00Z)")
+            print("ERROR: dates are yyyy-MM-dd (local days) or ISO 8601 (for example 2026-11-19T12:30:00Z)")
             exit(EXIT_FAILURE)
         }
         do {
             let directory = URL(filePath: arguments[flag + 3])
-            let manifest = try AuditExport.write(store: EventStore(url: url), from: from, to: end, to: directory)
+            // A bare day means "through the end of that day"; an instant is used as given.
+            let inclusiveEnd = end.isDay ? end.date.addingTimeInterval(86399) : end.date
+            let settings = Settings.load(from: Settings.url(near: url))
+            let manifest = try AuditExport.write(
+                store: EventStore(url: url), from: from.date, to: inclusiveEnd, to: directory,
+                mergeWindow: settings.mergeWindow)
             print("Exported \(manifest.rowCount) events and \(manifest.sessionCount) sessions to \(directory.path(percentEncoded: false))")
             exit(EXIT_SUCCESS)
         } catch {
@@ -72,7 +83,8 @@ func exportIfAsked(_ url: URL) {
     }
     if let flag = arguments.firstIndex(of: "--verify-export"), arguments.indices.contains(flag + 1) {
         do {
-            let report = try AuditExport.verify(directory: URL(filePath: arguments[flag + 1]))
+            let anchors = try AnchorLog.read(from: AnchorLog.url(near: url))
+            let report = try AuditExport.verify(directory: URL(filePath: arguments[flag + 1]), anchors: anchors)
             if let problem = report.problem {
                 print("BROKEN at row \(problem.firstBadRow): \(problem) (\(report.verifiedRows) rows verified before it)")
                 exit(EXIT_FAILURE)

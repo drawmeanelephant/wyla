@@ -81,6 +81,7 @@ actor Collector {
             }
         }
         perform { recorder -> [ActivationEvent] in
+            try recorder.markRunEndedCleanly()
             try recorder.heartbeat(at: .now)
             return []
         }
@@ -186,8 +187,7 @@ actor Collector {
                 logger.info(
                     """
                     Heartbeat: max log delay \(self.maxLogDelay, format: .fixed(precision: 2), privacy: .public) s, \
-                    late inputs \(self.recorder.lateInputs, privacy: .public), \
-                    unparsed TCC lines \(self.router.unparsedTCCLines, privacy: .public)
+                    late inputs \(self.recorder.lateInputs, privacy: .public)
                     """)
                 maxLogDelay = 0
             }
@@ -219,7 +219,6 @@ actor Collector {
         do {
             for case .started(let activation) in try operation(recorder) {
                 resolveApps(of: activation)
-                Notifier.notify(onStart: activation, store: store, settings: settings)
             }
         } catch {
             logger.fault("Database error, exiting: \(String(describing: error), privacy: .public)")

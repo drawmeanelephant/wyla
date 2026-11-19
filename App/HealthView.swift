@@ -63,6 +63,12 @@ struct HealthView: View {
                         Text(exported).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     }
                 }
+                Text(
+                    "Exports end at the end of the picked day. Only the JSON files carry hashes — "
+                        + "the CSV copies are for reading, not verifying."
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
             }
 
             if let error {
