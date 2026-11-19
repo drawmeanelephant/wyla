@@ -43,6 +43,7 @@ struct OnboardingView: View {
 }
 
 /// Shows the onboarding window on the first run, in front of other apps.
+@MainActor
 enum OnboardingWindow {
     static let doneKey = "WylaOnboardingDone"
 
@@ -52,9 +53,8 @@ enum OnboardingWindow {
     /// `-WylaOnboardingDone YES`, the same way they pass `-WylaSkipAgentRegistration YES`).
     static func showIfFirstRun(registration: AgentRegistration) {
         guard !UserDefaults.standard.bool(forKey: doneKey) else { return }
-        let window = NSWindow(
-            contentViewController: NSHostingController(
-                rootView: OnboardingView(registration: registration) { window?.close() }))
+        let view = OnboardingView(registration: registration) { close() }
+        let window = NSWindow(contentViewController: NSHostingController(rootView: view))
         window.title = "Welcome to WYLA"
         window.styleMask = [.titled, .closable]
         window.isReleasedWhenClosed = false
@@ -62,5 +62,10 @@ enum OnboardingWindow {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         self.window = window
+    }
+
+    private static func close() {
+        window?.close()
+        window = nil
     }
 }
