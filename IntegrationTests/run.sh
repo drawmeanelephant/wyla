@@ -35,15 +35,22 @@ expect_equal "launchd keeps the agent alive" "$(plist_value "$agent_plist" KeepA
 agent="$app/$(plist_value "$agent_plist" BundleProgram)"
 if [ -x "$agent" ]; then pass "BundleProgram points at an executable in the bundle"; else fail "BundleProgram points at an executable in the bundle ($agent)"; fi
 
-# The agent must keep running (launchd restarts it otherwise) and log its startup.
+# The agent must keep running (launchd restarts it otherwise), log its startup, and record its
+# run. It uses a temporary database so that it never touches the real one.
 if [ -x "$agent" ]; then
+    database_dir=$(mktemp -d)
+    database="$database_dir/wyla.sqlite"
     started_at=$(date '+%Y-%m-%d %H:%M:%S')
-    "$agent" &
+    "$agent" --database "$database" &
     agent_pid=$!
-    sleep 2
+    sleep 3
     if kill -0 "$agent_pid" 2>/dev/null; then pass "agent keeps running after launch"; else fail "agent keeps running after launch"; fi
-    kill "$agent_pid" 2>/dev/null || true
+    kill -TERM "$agent_pid" 2>/dev/null || true
     wait "$agent_pid" 2>/dev/null || true
+    runs=$(sqlite3 -readonly "$database" 'SELECT count(*) FROM coverage WHERE last_heartbeat_us > started_us' 2>/dev/null || echo 0)
+    expect_equal "agent records its run and a heartbeat when it stops" "$runs" "1"
+    expect_equal "database is private" "$(stat -f '%Lp' "$database" 2>/dev/null)" "600"
+    rm -rf "$database_dir"
     if log show --start "$started_at" --style compact \
         --predicate "subsystem == \"$app_id\" AND category == \"agent\"" | grep -q "WylaAgent started"; then
         pass "agent logs its startup message"
@@ -53,7 +60,7 @@ if [ -x "$agent" ]; then
 fi
 
 # The app must launch and stay up as a menu bar app.
-open -n "$app"
+open -n "$app" --args -WylaSkipAgentRegistration YES
 app_pid=""
 for _ in 1 2 3 4 5 6 7 8 9 10; do
     app_pid=$(pgrep -n -x Wyla || true)

@@ -6,6 +6,9 @@ public final class EventStore: Sendable {
     public let url: URL
     let pool: DatabasePool
 
+    /// The Darwin notification the agent posts after it writes, so that readers refresh.
+    public static let changeNotification = "io.github.drawmeanelephant.wyla.changed"
+
     /// `~/Library/Application Support/io.github.drawmeanelephant.wyla/wyla.sqlite`
     public static var defaultURL: URL {
         URL.applicationSupportDirectory.appending(path: "io.github.drawmeanelephant.wyla", directoryHint: .isDirectory)
@@ -33,6 +36,15 @@ public final class EventStore: Sendable {
     public func activations() throws -> [Activation] {
         try pool.read { db in
             try Row.fetchAll(db, sql: "SELECT * FROM activations ORDER BY start_us, sensor, client").map(Activation.init(row:))
+        }
+    }
+
+    /// Saves what `AppResolver` found about a client. Keeps the name from the system log if there is one.
+    public func save(_ info: AppInfo, for client: String) throws {
+        try pool.write { db in
+            try db.execute(
+                sql: "UPDATE apps SET name = ifnull(name, ?), path = ?, team_id = ? WHERE client = ?",
+                arguments: [info.name, info.path, info.teamID, client])
         }
     }
 
@@ -73,10 +85,11 @@ public final class EventStore: Sendable {
         let isNew: Bool
     }
 
-    /// Appends a row to the hash chain, unless a row with the same dedup key exists.
-    static func append(_ source: RawEventSource, time: Date, message: String, in db: Database) throws -> Appended {
+    /// Appends a row to the hash chain, unless a row with the same dedup key exists. `identity`
+    /// tells apart events with the same message; nil means the time.
+    static func append(_ source: RawEventSource, time: Date, identity: String?, message: String, in db: Database) throws -> Appended {
         let timeMicros = time.microseconds
-        let dedupKey = HashChain.dedupKey(source: source, timeMicros: timeMicros, message: message)
+        let dedupKey = HashChain.dedupKey(source: source, identity: identity ?? String(timeMicros), message: message)
         if let existing = try Int64.fetchOne(db, sql: "SELECT id FROM raw_events WHERE dedup_key = ?", arguments: [dedupKey]) {
             return Appended(id: existing, isNew: false)
         }

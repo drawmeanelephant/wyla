@@ -45,11 +45,27 @@ public struct SessionBuilder: Sendable {
     public init() {}
 
     /// Resumes after a restart with the activations that were open when the agent stopped.
-    /// Replay the current hardware state next, then the backfilled log events.
+    /// Replay the backfilled log events next, then the current hardware state.
     public init(restoring activations: [Activation]) {
         for activation in activations where activation.end == nil {
             open[activation.key] = activation
         }
+    }
+
+    public var hasOpenActivations: Bool { !open.isEmpty }
+
+    /// Adds to the restored activations the device use in `changes`, the hardware changes of the
+    /// previous agent run, up to `time`, when that run stopped. Use counted before the activations
+    /// were saved is not counted again. The devices count as stopped from `time` on.
+    public mutating func countDeviceUse(replaying changes: [HardwareChange], until time: Date) {
+        for change in changes {
+            countDeviceUse(of: change.sensor, until: change.time)
+            runningSince[change.sensor, default: [:]][change.device] = change.isRunning ? change.time : nil
+        }
+        for sensor in Sensor.allCases {
+            countDeviceUse(of: sensor, until: time)
+        }
+        runningSince = [:]
     }
 
     /// The activations in progress, with device use counted up to `time`. Store these so a

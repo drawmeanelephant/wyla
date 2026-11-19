@@ -8,8 +8,17 @@ enum Schema {
         migrator.registerMigration("v1") { db in
             try db.execute(sql: version1)
         }
+        migrator.registerMigration("v2") { db in
+            try db.execute(sql: version2)
+        }
         return migrator
     }
+
+    /// Marks clients that Control Center names by executable name, such as `bash`.
+    private static let version2 = """
+        ALTER TABLE apps ADD COLUMN command_line INTEGER NOT NULL DEFAULT 0;
+        UPDATE apps SET command_line = 1 WHERE instr(client, '.') = 0;
+        """
 
     private static let version1 = """
         CREATE TABLE raw_events (

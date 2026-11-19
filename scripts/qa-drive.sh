@@ -7,7 +7,7 @@
 set -eu
 
 if [ $# -gt 0 ]; then
-    open -n "$1"
+    open -n "$1" --args -WylaSkipAgentRegistration YES
     sleep 3
 fi
 pgrep -x Wyla >/dev/null || { echo "WYLA is not running. Run \`make run\` first." >&2; exit 1; }

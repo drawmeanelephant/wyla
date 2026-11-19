@@ -40,6 +40,18 @@ sqlite3 -readonly ~/Library/Application\ Support/io.github.drawmeanelephant.wyla
 
 The last `coverage` row's `last_heartbeat_us` should be less than 30 s old while the agent runs. Don't open the database for writing: `raw_events` rejects changes, and editing other tables can break the links that the integrity check relies on.
 
+Check the hash chain with the agent's verifier. It prints `OK` with the row count and chain head, or `BROKEN` with the first bad row, and exits with status 1 when the chain is broken:
+
+```sh
+/Applications/Wyla.app/Contents/MacOS/WylaAgent --verify
+```
+
+Every 30 s the agent logs a heartbeat line with the longest delay of a live log line, the count of late inputs (stored but not applied, see `docs/SPEC.md`, "Collector"), and the count of TCC lines it could not parse. Late inputs that keep growing, or a delay of more than a second, point to a problem with `log stream`.
+
+### Live collector check
+
+`IntegrationTests/live-sessions.sh build/DerivedData/Build/Products/Debug/Wyla.app` runs the agent against real sensor use, with a temporary database: two Photo Booth camera sessions of about 10 s, with the agent killed mid-session each time, and a `screencapture -x` screenshot. It checks the recorded activations, the coverage rows, and the hash chain. It needs a camera and Photo Booth's camera permission, so CI doesn't run it. Run it after changing the collector. A session can fail when macOS doesn't log Control Center's attribution line; the printed log lines show whether that happened.
+
 ## Common problems
 
 ### The agent is not running

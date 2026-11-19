@@ -4,10 +4,20 @@ import Foundation
 public struct LogEvent: Sendable, Equatable {
     public let timestamp: Date
     public let message: String
+    /// The logging subsystem and category, which tell the sources of a combined stream apart.
+    public let subsystem: String?
+    public let category: String?
+    /// Identifies the log entry within a boot: its `machTimestamp`. `log stream` and `log show`
+    /// report the same entry with wall-clock timestamps about 1 ms apart, but the same mach time.
+    /// The `bootUUID` field can't be part of it, because `log stream` leaves it empty.
+    public let entryID: String?
 
-    public init(timestamp: Date, message: String) {
+    public init(timestamp: Date, message: String, subsystem: String? = nil, category: String? = nil, entryID: String? = nil) {
         self.timestamp = timestamp
         self.message = message
+        self.subsystem = subsystem
+        self.category = category
+        self.entryID = entryID
     }
 }
 
@@ -31,13 +41,19 @@ extension LogLine {
             self = .malformed
             return
         }
-        self = .event(LogEvent(timestamp: timestamp, message: raw.eventMessage))
+        self = .event(
+            LogEvent(
+                timestamp: timestamp, message: raw.eventMessage, subsystem: raw.subsystem, category: raw.category,
+                entryID: raw.machTimestamp.map(String.init)))
     }
 }
 
 private struct RawEvent: Decodable {
     let timestamp: String
     let eventMessage: String
+    let subsystem: String?
+    let category: String?
+    let machTimestamp: UInt64?
 }
 
 /// Parses the `log` ndjson timestamp format, `2026-11-18 13:55:46.482710-0500`, keeping microseconds.

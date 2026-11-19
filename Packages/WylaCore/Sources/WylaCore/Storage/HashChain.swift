@@ -17,7 +17,8 @@ public enum RawEventSource: String, CaseIterable, Sendable {
 /// row's hash, so editing, removing, or inserting a row breaks every hash after it.
 ///
 /// Hashes and dedup keys are lowercase hex SHA-256 of UTF-8 text:
-/// - `dedup_key = sha256("<source>\n<time_us>\n<message>")`
+/// - `dedup_key = sha256("<source>\n<identity>\n<message>")`, where the identity of an
+///   `indicator` row is its log entry's `machTimestamp` in decimal, and of other rows `<time_us>`
 /// - `hash = sha256("<id>\n<time_us>\n<source>\n<dedup_key>\n<prev_hash>\n<message>")`
 ///
 /// The first row's `prev_hash` is 64 zeros. The message comes last because it is the only field
@@ -25,8 +26,8 @@ public enum RawEventSource: String, CaseIterable, Sendable {
 enum HashChain {
     static let genesis = String(repeating: "0", count: 64)
 
-    static func dedupKey(source: RawEventSource, timeMicros: Int64, message: String) -> String {
-        sha256("\(source.rawValue)\n\(timeMicros)\n\(message)")
+    static func dedupKey(source: RawEventSource, identity: String, message: String) -> String {
+        sha256("\(source.rawValue)\n\(identity)\n\(message)")
     }
 
     fileprivate static func sha256(_ text: String) -> String {

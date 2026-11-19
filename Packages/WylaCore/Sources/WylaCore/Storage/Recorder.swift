@@ -21,7 +21,9 @@ public enum RecorderInput: Sendable, Equatable {
 
 /// Stores raw events and the activations that `SessionBuilder` derives from them, one transaction
 /// per input. An input whose raw event is already stored is skipped, so replaying backfilled log
-/// lines that overlap what was recorded changes nothing. Inputs must arrive in timestamp order.
+/// lines that overlap what was recorded changes nothing. Inputs must arrive in timestamp order:
+/// a new input older than one already applied is stored but doesn't change activations. That
+/// happens when the backfill reaches before the time the previous run began recording.
 public final class Recorder {
     public let store: EventStore
     /// The last heartbeat of the previous agent run, or nil on the first run.
@@ -34,20 +36,61 @@ public final class Recorder {
     /// and ended them.
     private var recentEvents: [Int64: Int64] = [:]
     private var recentRequests: [TCCRequest] = []
+    /// Committed write transactions, so that the caller can tell readers when the database changed.
+    public private(set) var writeCount = 0
+    /// The time of the latest input applied to the builder, in this run or a previous one.
+    private var appliedUntil: Date?
+    /// New inputs that were older than `appliedUntil`, so stored without changing activations.
+    public private(set) var lateInputs = 0
 
     /// Starts an agent run at `time` and resumes the activations that were open when the previous
-    /// run stopped. Record the current hardware state next, then the backfilled log events.
+    /// run stopped. Record the backfilled log events next, then the current hardware state.
     public init(store: EventStore, startingAt time: Date) throws {
         self.store = store
-        (previousHeartbeat, runID, builder) = try store.pool.write { db in
+        let (previous, runID, builder, checkpoints, applied) = try store.pool.write { db in
             let previous = try Int64.fetchOne(db, sql: "SELECT max(last_heartbeat_us) FROM coverage")
+            let applied = try Int64.fetchOne(db, sql: "SELECT max(time_us) FROM raw_events")
+            let open = try Row.fetchAll(db, sql: "SELECT * FROM activations WHERE end_us IS NULL").map(Activation.init(row:))
+            var builder = SessionBuilder(restoring: open)
+            if !open.isEmpty {
+                try Self.replayPreviousRunHardware(into: &builder, in: db)
+            }
             try db.execute(
                 sql: "INSERT INTO coverage (started_us, last_heartbeat_us) VALUES (?, ?)",
                 arguments: [time.microseconds, time.microseconds])
-            let open = try Row.fetchAll(db, sql: "SELECT * FROM activations WHERE end_us IS NULL").map(Activation.init(row:))
-            return (previous.map(Date.init(microseconds:)), db.lastInsertedRowID, SessionBuilder(restoring: open))
+            let runID = db.lastInsertedRowID
+            var checkpoints: [RawEventSource: Date] = [:]
+            for row in try Row.fetchAll(db, sql: "SELECT source, time_us FROM checkpoints") {
+                if let source = RawEventSource(rawValue: row["source"]) {
+                    checkpoints[source] = Date(microseconds: row["time_us"])
+                }
+            }
+            return (previous.map(Date.init(microseconds:)), runID, builder, checkpoints, applied.map(Date.init(microseconds:)))
         }
+        (self.previousHeartbeat, self.runID, self.builder, self.checkpoints) = (previous, runID, builder, checkpoints)
+        appliedUntil = applied
     }
+
+    /// Counts the device use that the previous run saw after its last heartbeat, which it didn't
+    /// save if it was killed. Its hardware changes are replayed up to the last time it is known to
+    /// have been running: its last heartbeat or the last event stored. The hardware state while no
+    /// agent ran is unknown, so it isn't counted.
+    private static func replayPreviousRunHardware(into builder: inout SessionBuilder, in db: Database) throws {
+        guard let run = try Row.fetchOne(db, sql: "SELECT started_us, last_heartbeat_us FROM coverage ORDER BY id DESC LIMIT 1")
+        else { return }
+        let lastEvent = try Int64.fetchOne(db, sql: "SELECT max(time_us) FROM raw_events") ?? 0
+        let lastSeen = Date(microseconds: max(run["last_heartbeat_us"], lastEvent))
+        let changes = try Row.fetchAll(
+            db, sql: "SELECT time_us, message FROM raw_events WHERE source = 'hardware' AND time_us >= ? ORDER BY id",
+            arguments: [run["started_us"] as Int64]
+        ).compactMap { HardwareChange(message: $0["message"], time: Date(microseconds: $0["time_us"])) }
+        builder.countDeviceUse(replaying: changes, until: lastSeen)
+    }
+
+    public var hasOpenActivations: Bool { builder.hasOpenActivations }
+
+    /// The latest log timestamp recorded, in this run or saved by an earlier one. Backfill resumes from it.
+    public var processedLogTime: Date? { checkpoints.values.max() }
 
     @discardableResult
     public func record(_ input: RecorderInput) throws -> [ActivationEvent] {
@@ -56,7 +99,7 @@ public final class Recorder {
         switch input {
         case .indicator(let event):
             checkpoints[.indicator] = max(checkpoints[.indicator] ?? time, time)
-            let raw = RawInput(source: .indicator, time: time, message: event.message)
+            let raw = RawInput(source: .indicator, time: time, identity: event.entryID, message: event.message)
             switch parser.parse(event.message) {
             case .ignored: return []
             // Unparsed lines are kept for the Health view and for audit.
@@ -68,7 +111,7 @@ public final class Recorder {
             recentRequests.append(request)
             return try apply(nil, .tccRequest(request), at: time)
         case .hardware(let change):
-            return try apply(RawInput(source: .hardware, time: time, message: change.message), .hardware(change), at: time)
+            return try apply(RawInput(source: .hardware, time: time, identity: nil, message: change.message), .hardware(change), at: time)
         }
     }
 
@@ -83,7 +126,7 @@ public final class Recorder {
     public func heartbeat(at time: Date) throws {
         var next = builder
         let open = next.snapshot(at: time)
-        try store.pool.write { db in
+        try write { db in
             try db.execute(
                 sql: "UPDATE coverage SET last_heartbeat_us = ? WHERE id = ?", arguments: [time.microseconds, runID])
             for (source, checkpoint) in checkpoints {
@@ -107,7 +150,7 @@ public final class Recorder {
     public func closeOpenActivations(at time: Date, reason: EndReason) throws -> [ActivationEvent] {
         var next = builder
         let events = next.closeAll(at: time, reason: reason)
-        try store.pool.write { db in try persist(events, currentEvent: nil, in: db) }
+        try write { db in try persist(events, currentEvent: nil, in: db) }
         builder = next
         return events
     }
@@ -115,6 +158,7 @@ public final class Recorder {
     private struct RawInput {
         let source: RawEventSource
         let time: Date
+        let identity: String?
         let message: String
     }
 
@@ -124,22 +168,34 @@ public final class Recorder {
         var next = builder
         var events: [ActivationEvent] = []
         var stored: EventStore.Appended?
+        let isLate = appliedUntil.map { time < $0 } ?? false
+        func build() -> [ActivationEvent] {
+            isLate ? [] : input.map { next.consume($0) } ?? next.advance(to: time)
+        }
         if let raw {
             try store.pool.write { db in
-                let appended = try EventStore.append(raw.source, time: raw.time, message: raw.message, in: db)
+                let appended = try EventStore.append(
+                    raw.source, time: raw.time, identity: raw.identity, message: raw.message, in: db)
                 stored = appended
                 guard appended.isNew else { return }
-                events = input.map { next.consume($0) } ?? next.advance(to: time)
+                events = build()
                 try persist(events, currentEvent: (time.microseconds, appended.id), in: db)
             }
         } else {
-            events = input.map { next.consume($0) } ?? next.advance(to: time)
+            events = build()
             if !events.isEmpty {
-                try store.pool.write { db in try persist(events, currentEvent: nil, in: db) }
+                try write { db in try persist(events, currentEvent: nil, in: db) }
             }
         }
         if let stored {
             recentEvents[time.microseconds] = stored.id
+            guard stored.isNew else { return [] }
+            writeCount += 1
+        }
+        if isLate {
+            lateInputs += 1
+        } else {
+            appliedUntil = time
         }
         builder = next
         return events
@@ -171,7 +227,12 @@ public final class Recorder {
                     && activation.start.timeIntervalSince($0.time) <= SessionBuilder.responsibleMatchWindow
             })
         else { return nil }
-        return try EventStore.append(.tcc, time: request.time, message: try canonicalJSON(request), in: db).id
+        return try EventStore.append(.tcc, time: request.time, identity: nil, message: try canonicalJSON(request), in: db).id
+    }
+
+    private func write(_ updates: (Database) throws -> Void) throws {
+        try store.pool.write(updates)
+        writeCount += 1
     }
 
     private func prune(at time: Date) {
@@ -184,4 +245,10 @@ public final class Recorder {
 extension HardwareChange {
     /// The `raw_events` message for a hardware change: `camera MacBook Pro Camera on`.
     var message: String { "\(sensor.rawValue) \(device) \(isRunning ? "on" : "off")" }
+
+    init?(message: String, time: Date) {
+        let words = message.split(separator: " ", omittingEmptySubsequences: false)
+        guard words.count >= 3, let sensor = Sensor(rawValue: String(words[0])), ["on", "off"].contains(words.last) else { return nil }
+        self.init(time: time, sensor: sensor, device: words.dropFirst().dropLast().joined(separator: " "), isRunning: words.last == "on")
+    }
 }
