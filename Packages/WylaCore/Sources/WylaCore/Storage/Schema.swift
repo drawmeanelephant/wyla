@@ -29,6 +29,18 @@ enum Schema {
         INSERT INTO tcc_requests (message_id, raw_event_id)
             SELECT json_extract(message, '$.messageID'), id FROM raw_events
             WHERE source = 'tcc' AND json_extract(message, '$.messageID') IS NOT NULL;
+        -- Databases that predate the Requests totals stored request events without counting
+        -- them; rebuild their totals too. `time` is JSONEncoder's seconds since 2001.
+        INSERT INTO tcc_requests_agg (minute_us, client, service, auth_value, count)
+            SELECT CAST((json_extract(message, '$.time') + 978307200) * 1000000 / 60000000 AS INTEGER) * 60000000,
+                ifnull(coalesce(json_extract(message, '$.responsible.identifier'),
+                    json_extract(message, '$.accessing.identifier'),
+                    json_extract(message, '$.requesting.identifier')), ''),
+                json_extract(message, '$.service'), json_extract(message, '$.authValue'), count(*)
+            FROM raw_events
+            WHERE source = 'tcc' AND json_extract(message, '$.messageID') IS NOT NULL
+                AND NOT EXISTS (SELECT 1 FROM tcc_requests_agg)
+            GROUP BY 1, 2, 3, 4;
         """
 
     /// Marks clients that Control Center names by executable name, such as `bash`.
