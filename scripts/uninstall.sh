@@ -1,23 +1,51 @@
 #!/bin/sh
-# Removes the parts `make install` put down: the launchd agent registration, the running
-# app and agent, and the .app in /Applications. `--delete-data` also removes the recorded
-# database and settings in ~/Library/Application Support/io.github.drawmeanelephant.wyla.
-# Usage: scripts/uninstall.sh [--delete-data]
-set -e
+# Removes the parts `make install` put down: the agent's SMAppService registration (through
+# the app's own --unregister-agent flag, since launchd keeps the stale path otherwise), the
+# running app and agent, and the .app in /Applications. `--delete-data` also removes the
+# recorded database, anchors.log, and settings in
+# ~/Library/Application Support/io.github.drawmeanelephant.wyla — including the chain anchors,
+# so a deleted-data uninstall discards the tamper evidence too. Pass --yes to skip the
+# confirmation (make uninstall-data passes it).
+# Usage: scripts/uninstall.sh [--delete-data] [--yes]
+set -eu
 
 LABEL="io.github.drawmeanelephant.wyla.agent"
+APP="/Applications/Wyla.app"
+DATA="$HOME/Library/Application Support/io.github.drawmeanelephant.wyla"
 
-launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-pkill -x WylaAgent 2>/dev/null || true
+DELETE_DATA=0
+ASSUME_YES=0
+for arg in "$@"; do
+    case "$arg" in
+        --delete-data) DELETE_DATA=1 ;;
+        --yes) ASSUME_YES=1 ;;
+        *) echo "unknown argument: $arg" >&2; echo "usage: $0 [--delete-data] [--yes]" >&2; exit 2 ;;
+    esac
+done
+
+if [ "$DELETE_DATA" = 1 ] && [ "$ASSUME_YES" != 1 ]; then
+    printf 'Delete the recorded database, anchors.log, and settings in %s? [y/N] ' "$DATA"
+    read -r answer
+    case "$answer" in
+        y|Y|yes|YES) ;;
+        *) echo "aborted" >&2; exit 1 ;;
+    esac
+fi
+
 osascript -e 'tell application "Wyla" to quit' 2>/dev/null || true
-pkill -x Wyla 2>/dev/null || true
-rm -rf /Applications/Wyla.app
+launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+# Unregister through the app's own bundle while it still exists; SMAppService would keep the
+# registration for a deleted bundle, and a fresh install would then be stuck off.
+if [ -x "$APP/Contents/MacOS/Wyla" ]; then
+    "$APP/Contents/MacOS/Wyla" --unregister-agent >/dev/null 2>&1 || true
+fi
+rm -rf "$APP"
 
-if [ "${1:-}" = "--delete-data" ]; then
-    rm -rf "$HOME/Library/Application Support/io.github.drawmeanelephant.wyla"
+if [ "$DELETE_DATA" = 1 ]; then
+    rm -rf "$DATA"
     # Saved preferences decide first-run behavior, so they go with the data.
     defaults delete io.github.drawmeanelephant.wyla 2>/dev/null || true
-    echo "WYLA removed, including the recorded log."
+    echo "WYLA removed, including the recorded log and its chain anchors."
 else
     echo "WYLA removed; the recorded log was kept. Re-run with --delete-data to delete it."
 fi

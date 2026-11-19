@@ -90,16 +90,21 @@ install: generate ## Build Release, copy WYLA into /Applications, and open it
 		|| { tail -n 60 build/xcodebuild-release.log; exit 1; }
 	osascript -e 'tell application "Wyla" to quit' 2>/dev/null || true
 	launchctl bootout "gui/$$(id -u)/io.github.drawmeanelephant.wyla.agent" 2>/dev/null || true
-	pkill -x WylaAgent 2>/dev/null || true
 	sleep 1
-	ditto --norsrc build/ReleaseDerivedData/Build/Products/Release/Wyla.app /Applications/Wyla.app
+	# Copy to a staging name next to the target first: `ditto` over a live bundle merges new
+	# files into the old ones, which leaves stale code behind and breaks the signature.
+	rm -rf /Applications/.Wyla-staging.app
+	ditto --norsrc build/ReleaseDerivedData/Build/Products/Release/Wyla.app /Applications/.Wyla-staging.app
+	rm -rf /Applications/Wyla.app
+	mv /Applications/.Wyla-staging.app /Applications/Wyla.app
+	codesign --verify --deep --strict /Applications/Wyla.app
 	open /Applications/Wyla.app
 
 uninstall: ## Stop the agent and app, then remove WYLA from /Applications (keeps the log)
 	scripts/uninstall.sh
 
 uninstall-data: ## Like uninstall, and also deletes the recorded database and settings
-	scripts/uninstall.sh --delete-data
+	scripts/uninstall.sh --delete-data --yes
 
 open: generate ## Open the generated Xcode project
 	open $(PROJECT)

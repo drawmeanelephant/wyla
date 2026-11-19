@@ -31,6 +31,7 @@ Run `make help` for the full list.
 - `make integration-test`: check the built bundle's layout, the agent's startup, and the app's launch.
 - `make qa`: build, then drive the real app through its menu and window with `scripts/qa-drive.sh`. Needs Accessibility permission for the process that runs it; not run in CI.
 - `make check`: everything CI runs (`format-check lint coverage duplicates analyze integration-test`).
+- `make install` / `make uninstall` / `make uninstall-data`: build Release, replace the bundle in /Applications atomically (signature-verified), or remove it; `uninstall-data` also deletes the database, anchors.log, and settings.
 - `make release-zip VERSION=v0.1.0`: build Release and zip the app into `build/release/`.
 
 ## Verifying a change

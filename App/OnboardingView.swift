@@ -21,14 +21,15 @@ struct OnboardingView: View {
             .fixedSize(horizontal: false, vertical: true)
             Text(
                 """
-                To watch the sensors, WYLA installs a background agent. If macOS asks, \
-                allow WYLA under System Settings → General → Login Items, or it stays off.
+                To watch the sensors, WYLA installs a background agent, which needs an \
+                administrator account to allow. If macOS asks, allow WYLA under System \
+                Settings → General → Login Items & Extensions, or it stays off.
                 """
             )
             .fixedSize(horizontal: false, vertical: true)
             Text(registration.summary).foregroundStyle(.secondary)
             HStack {
-                Button("Open Login Items Settings") { registration.openLoginItemsSettings() }
+                Button("Open Login Items & Extensions") { registration.openLoginItemsSettings() }
                 Spacer()
                 Button("Done") {
                     UserDefaults.standard.set(true, forKey: OnboardingWindow.doneKey)
@@ -39,6 +40,12 @@ struct OnboardingView: View {
         }
         .padding(24)
         .frame(width: 460)
+        // The status row follows the Login Items switch when the user comes back from it.
+        .onReceive(
+            NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+        ) { _ in
+            registration.refresh()
+        }
     }
 }
 
@@ -59,12 +66,20 @@ enum OnboardingWindow {
         window.styleMask = [.titled, .closable]
         window.isReleasedWhenClosed = false
         window.center()
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         window.makeKeyAndOrderFront(nil)
         self.window = window
+        // Closing with the window's own button marks onboarding done the same as "Done".
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: window, queue: .main
+        ) { _ in
+            UserDefaults.standard.set(true, forKey: doneKey)
+        }
     }
 
-    private static func close() {
+    /// Closes the window and marks onboarding done — dismissing it counts as done either way.
+    static func close() {
+        UserDefaults.standard.set(true, forKey: doneKey)
         window?.close()
         window = nil
     }

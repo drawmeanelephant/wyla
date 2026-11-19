@@ -60,7 +60,7 @@ if [ -x "$agent" ]; then
 fi
 
 # The app must launch and stay up as a menu bar app.
-open -n "$app" --args -WylaSkipAgentRegistration YES
+open -n "$app" --args -WylaSkipAgentRegistration YES -WylaOnboardingDone YES
 app_pid=""
 for _ in 1 2 3 4 5 6 7 8 9 10; do
     app_pid=$(pgrep -n -x Wyla || true)

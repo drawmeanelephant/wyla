@@ -30,14 +30,7 @@ From M7, the viewer exports the log as CSV or JSON, with the hash chain, so you 
 
 ## Delete everything
 
-1. Quit WYLA from its menu bar item. This also stops the agent.
-2. Delete the data folder:
-
-   ```sh
-   rm -rf ~/Library/Application\ Support/io.github.drawmeanelephant.wyla
-   ```
-
-3. To uninstall, remove `Wyla.app` as well. macOS unregisters the agent when the app is deleted. Check in System Settings > General > Login Items & Extensions that WYLA is no longer listed.
+Run `make uninstall-data` (or `scripts/uninstall.sh --delete-data --yes`). It stops the app and agent, drops the agent's SMAppService registration while the bundle still exists — macOS does not reliably unregister the agent for a deleted bundle — removes `Wyla.app`, and deletes the data folder `~/Library/Application Support/io.github.drawmeanelephant.wyla` (the database, anchors.log, and settings) plus the saved preferences. `make uninstall` does the same but keeps the recorded log. Check in System Settings > General > Login Items & Extensions that WYLA is no longer listed.
 
 ## Logs and personal data in code
 
