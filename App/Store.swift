@@ -30,8 +30,17 @@ final class Store {
     private var store: EventStore?
     /// The agent's last heartbeat; a stale one means it died leaving activations open.
     private(set) var lastHeartbeat: Date?
+    /// Whether the agent reported itself alive recently.
+    private(set) var monitoringLive = false
     /// The object the Darwin notification callback is registered for.
     private let relay = NotificationRelay()
+    /// Re-evaluates heartbeat staleness while nothing is writing: a dead agent posts no
+    /// notification, so without it "in use" would never clear.
+    private var livenessTimer: Timer?
+    /// One reload at a time; notifications that arrive while one runs fold into a single
+    /// trailing reload, so heartbeat writes don't queue up merge work.
+    private var reloadInFlight = false
+    private var reloadPending = false
 
     /// The agent heartbeats every 30 s while idle and every 5 s while an activation is open, so a
     /// heartbeat older than this belongs to a dead agent.
@@ -54,6 +63,10 @@ final class Store {
             lastHeartbeat = nil
         }
         reload()
+        refreshLiveness()
+        livenessTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshLiveness() }
+        }
         relay.onChange = { [weak self] in
             Task { @MainActor in self?.reload() }
         }
@@ -72,8 +85,19 @@ final class Store {
             Unmanaged.passUnretained(relay).toOpaque(),
             CFNotificationName(EventStore.changeNotification as CFString),
             nil)
+        livenessTimer?.invalidate()
     }
 
+    /// What one read of the database produces. Sendable so it can cross back to the main actor.
+    private struct Snapshot: Sendable {
+        let activations: [Activation]
+        let sessions: [Session]
+        let apps: [String: StoredApp]
+        let heartbeat: Date?
+    }
+
+    /// Reads the database and merges sessions off the main actor; with ~50k rows that takes
+    /// ~0.7 s, which would otherwise stall the window on every heartbeat write.
     func reload() {
         // Retry opening: on first launch the agent can still be creating the database.
         if store == nil {
@@ -84,21 +108,49 @@ final class Store {
             }
         }
         guard let store else { return }
-        do {
-            activations = try store.activations()
-            sessions = SessionMerger.merge(activations)
-            apps = Dictionary(try store.apps().map { ($0.client, $0) }, uniquingKeysWith: { first, _ in first })
-            lastHeartbeat = try store.lastHeartbeat()
-            loadError = nil
-        } catch {
-            loadError = error.localizedDescription
+        guard !reloadInFlight else {
+            reloadPending = true
+            return
+        }
+        reloadInFlight = true
+        Task.detached { [weak self] in
+            let snapshot: Snapshot
+            do {
+                let activations = try store.activations()
+                snapshot = Snapshot(
+                    activations: activations,
+                    sessions: SessionMerger.merge(activations),
+                    apps: Dictionary(try store.apps().map { ($0.client, $0) }, uniquingKeysWith: { first, _ in first }),
+                    heartbeat: try store.lastHeartbeat())
+            } catch {
+                await self?.finishReload(result: .failure(error))
+                return
+            }
+            await self?.finishReload(result: .success(snapshot))
         }
     }
 
-    /// Whether the agent reported itself alive recently.
-    var monitoringLive: Bool {
-        guard let lastHeartbeat else { return false }
-        return Date.now.timeIntervalSince(lastHeartbeat) < Self.livenessWindow
+    private func finishReload(result: Result<Snapshot, Error>) {
+        reloadInFlight = false
+        switch result {
+        case .success(let snapshot):
+            activations = snapshot.activations
+            sessions = snapshot.sessions
+            apps = snapshot.apps
+            lastHeartbeat = snapshot.heartbeat
+            loadError = nil
+            refreshLiveness()
+        case .failure(let error):
+            loadError = error.localizedDescription
+        }
+        if reloadPending {
+            reloadPending = false
+            reload()
+        }
+    }
+
+    private func refreshLiveness() {
+        monitoringLive = lastHeartbeat.map { Date.now.timeIntervalSince($0) < Self.livenessWindow } ?? false
     }
 
     /// What "now" means to the viewer: the present while the agent runs, its last heartbeat once
@@ -113,7 +165,7 @@ final class Store {
     /// activations it left behind ended no later than its last heartbeat.
     var activeNow: [Activation] {
         guard monitoringLive else { return [] }
-        return activations.filter { $0.end == nil }.sorted { $0.start > $1.start }
+        return Array(activations.filter { $0.end == nil }.reversed())
     }
 
     /// Sessions that started today, per sensor.
@@ -148,9 +200,13 @@ final class Store {
         Self.icon(for: app.client.flatMap { apps[$0] })
     }
 
-    /// The app's icon when its path is known, a generic app icon otherwise.
+    /// The app's icon when its bundle resolves to the client, a generic app icon otherwise.
+    /// The bundle identifier is checked because an `.app` suffix in the path does not prove the
+    /// bundle is the client's.
     static func icon(for app: StoredApp?) -> NSImage {
-        if let path = app?.path.flatMap(Self.bundlePath) {
+        let bundlePath = app?.path.flatMap(Self.bundlePath)
+        let resolvesToClient = bundlePath.map { Bundle(path: $0)?.bundleIdentifier == app?.client } ?? false
+        if let path = bundlePath, resolvesToClient {
             return NSWorkspace.shared.icon(forFile: path)
         }
         return NSImage(systemSymbolName: "app.fill", accessibilityDescription: nil) ?? NSImage()

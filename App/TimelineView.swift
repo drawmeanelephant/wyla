@@ -14,7 +14,9 @@ struct TimelineView: View {
     private var filtered: [Session] {
         var query = query
         query.range = rangeEnabled ? min(rangeFrom, rangeTo)..<max(rangeFrom, rangeTo) : nil
-        return query.apply(to: store.sessions, asOf: store.liveAsOf).sorted { $0.start > $1.start }
+        query.resolvedNames = store.apps.compactMapValues(\.name)
+        // Sessions come back ordered by start; the table shows them newest first.
+        return Array(query.apply(to: store.sessions, asOf: store.liveAsOf).reversed())
     }
 
     var body: some View {
@@ -34,6 +36,8 @@ struct TimelineView: View {
                     }
                 }
                 .fixedSize()
+                .disabled(query.unattributedOnly)
+                Toggle("Unattributed only", isOn: $query.unattributedOnly)
                 Spacer()
                 TextField("Search", text: $query.text)
                     .textFieldStyle(.roundedBorder)

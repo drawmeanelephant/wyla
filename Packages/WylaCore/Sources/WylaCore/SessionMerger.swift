@@ -41,17 +41,20 @@ public enum SessionMerger {
 
     /// Groups activations into sessions, sorted by start time.
     public static func merge(_ activations: [Activation], window: TimeInterval = defaultWindow) -> [Session] {
-        var groups: [ActivationKey: [[Activation]]] = [:]
+        // Flat session list plus each key's open session index, so appending doesn't copy the
+        // group's arrays on every activation.
+        var merged: [[Activation]] = []
+        var open: [ActivationKey: Int] = [:]
         for activation in activations.sorted(by: { $0.start < $1.start }) {
-            var sessions = groups[activation.key, default: []]
-            if let previousEnd = sessions.last?.last?.end, activation.start.timeIntervalSince(previousEnd) < window {
-                sessions[sessions.count - 1].append(activation)
+            let openEnd = open[activation.key].flatMap { merged[$0].last?.end }
+            if let index = open[activation.key], let previousEnd = openEnd, activation.start.timeIntervalSince(previousEnd) < window {
+                merged[index].append(activation)
             } else {
-                sessions.append([activation])
+                open[activation.key] = merged.count
+                merged.append([activation])
             }
-            groups[activation.key] = sessions
         }
-        return groups.values.joined().map(Session.init(activations:)).sorted {
+        return merged.map(Session.init(activations:)).sorted {
             ($0.start, $0.sensor.rawValue, $0.client ?? "") < ($1.start, $1.sensor.rawValue, $1.client ?? "")
         }
     }

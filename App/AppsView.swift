@@ -8,7 +8,7 @@ struct AppsView: View {
     @State private var selection: AppSummary.ID?
 
     private var summaries: [AppSummary] {
-        AppSummary.all(from: store.sessions, asOf: store.liveAsOf)
+        AppSummary.all(from: store.sessions, activations: store.activations, asOf: store.liveAsOf)
     }
 
     var body: some View {
@@ -21,6 +21,10 @@ struct AppsView: View {
                 }
                 .frame(maxHeight: .infinity)
             } else {
+                Text("Cam / Mic / Scr: sessions · activations")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
                 Table(summaries, selection: $selection) {
                     TableColumn("App") { summary in
                         Label {
@@ -32,15 +36,15 @@ struct AppsView: View {
                     TableColumn("Cam") { summary in
                         Text(count(summary, .camera))
                     }
-                    .width(36)
+                    .width(52)
                     TableColumn("Mic") { summary in
                         Text(count(summary, .microphone))
                     }
-                    .width(36)
+                    .width(52)
                     TableColumn("Scr") { summary in
                         Text(count(summary, .screen))
                     }
-                    .width(36)
+                    .width(52)
                     TableColumn("Total") { summary in
                         Text(Format.duration(summary.duration))
                     }
@@ -67,8 +71,11 @@ struct AppsView: View {
         summary.client.flatMap { store.apps[$0]?.name ?? $0 } ?? "Unattributed"
     }
 
+    /// `sessions · activations` for the sensor, a dash when the app used neither.
     private func count(_ summary: AppSummary, _ sensor: Sensor) -> String {
-        summary.counts[sensor].map(String.init) ?? "–"
+        let sessions = summary.counts[sensor] ?? 0
+        let activations = summary.activationCounts[sensor] ?? 0
+        return sessions == 0 && activations == 0 ? "–" : "\(sessions) · \(activations)"
     }
 
     /// Total time per day for the selected app, stacked by sensor.

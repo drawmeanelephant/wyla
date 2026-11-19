@@ -73,17 +73,39 @@ private struct Recorded {
     let recorded = try Recorded()
 
     let screens = SessionQuery(sensor: .screen).apply(to: recorded.sessions)
-    #expect(!screens.isEmpty && screens.allSatisfy { $0.sensor == .screen })
+    #expect(Set(screens.map(\.id)) == Set(recorded.sessions.filter { $0.sensor == .screen }.map(\.id)))
 
     let photoBooth = SessionQuery(client: "com.apple.PhotoBooth").apply(to: recorded.sessions)
-    #expect(!photoBooth.isEmpty && photoBooth.allSatisfy { $0.client == "com.apple.PhotoBooth" })
+    #expect(Set(photoBooth.map(\.id)) == Set(recorded.sessions.filter { $0.client == "com.apple.PhotoBooth" }.map(\.id)))
 
     // Text matches the display name and the responsible app as well as the client.
     #expect(SessionQuery(text: "photo booth").apply(to: recorded.sessions) == photoBooth)
     let factory = SessionQuery(text: "factory").apply(to: recorded.sessions)
-    #expect(factory.allSatisfy { $0.responsible?.identifier == "com.electron.factory" })
+    #expect(
+        Set(factory.map(\.id))
+            == Set(recorded.sessions.filter { $0.responsible?.identifier == "com.electron.factory" }.map(\.id)))
 
     #expect(SessionQuery().apply(to: recorded.sessions).count == recorded.sessions.count)
+}
+
+@Test func queryFiltersToUnattributedSessions() throws {
+    let recorded = try Recorded()
+    let unattributed = SessionQuery(unattributedOnly: true).apply(to: recorded.sessions)
+    #expect(
+        Set(unattributed.map(\.id)) == Set(recorded.sessions.filter { $0.client == nil }.map(\.id)))
+}
+
+@Test func queryTextMatchesTheResolvedName() throws {
+    let recorded = try Recorded()
+    let resolvedNames = try recorded.temporary.store.apps().reduce(into: [String: String]()) {
+        $0[$1.client] = $1.name
+    }
+
+    // The log records "com.apple.PhotoBooth"; the table shows "Photo Booth".
+    let named = SessionQuery(text: "photo booth", resolvedNames: resolvedNames).apply(to: recorded.sessions)
+    #expect(
+        Set(named.map(\.id))
+            == Set(recorded.sessions.filter { $0.client == "com.apple.PhotoBooth" }.map(\.id)))
 }
 
 @Test func queryRangeOverlapsSessions() throws {
@@ -100,11 +122,16 @@ private struct Recorded {
 @Test func appSummariesCountSessionsAndTime() throws {
     let recorded = try Recorded()
     let now = recorded.sessions.compactMap(\.end).max() ?? .now
-    let summaries = AppSummary.all(from: recorded.sessions, asOf: now)
+    let activations = try recorded.temporary.store.activations()
+    let summaries = AppSummary.all(from: recorded.sessions, activations: activations, asOf: now)
 
     let photoBooth = try #require(summaries.first { $0.client == "com.apple.PhotoBooth" })
     let expectedSessions = recorded.sessions.filter { $0.client == "com.apple.PhotoBooth" }
     #expect(photoBooth.counts[.camera] == expectedSessions.count)
+    #expect(
+        photoBooth.activationCounts[.camera]
+            == activations.filter { $0.client == "com.apple.PhotoBooth" && $0.sensor == .camera }.count)
+    #expect((photoBooth.activationCounts[.camera] ?? 0) >= (photoBooth.counts[.camera] ?? 0))
     #expect(photoBooth.counts[.microphone] == nil)
     #expect(photoBooth.duration == expectedSessions.reduce(0) { $0 + $1.duration(asOf: now) })
     #expect(photoBooth.firstUse == expectedSessions.map(\.start).min())
