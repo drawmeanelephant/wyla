@@ -45,20 +45,26 @@ private func sha256(_ text: String) -> String {
 
 @Test func chainFollowsTheDocumentedFormat() throws {
     let temporary = try recordedStore()
-    // Indicator rows are identified by their log entry, which the row doesn't store.
+    // Indicator rows are identified by their log entry, TCC rows by their request's messageID;
+    // the row doesn't store either.
     var entryIDs: [String: String] = [:]
     for case .indicator(let event) in try CaptureFixture("27.3-26C5035r").recorderInputs {
         entryIDs["\(Int64((event.timestamp.timeIntervalSince1970 * 1_000_000).rounded()))|\(event.message)"] = event.entryID
     }
     var previous = String(repeating: "0", count: 64)
     let rows = try temporary.rows("SELECT * FROM raw_events ORDER BY id")
-    #expect(rows.count == 85)
+    #expect(rows.count == 134)
     for (index, row) in rows.enumerated() {
         let id: Int64 = row["id"]
         let time: Int64 = row["time_us"]
         let source: String = row["source"]
         let message: String = row["message"]
-        let identity = source == "indicator" ? try #require(entryIDs["\(time)|\(message)"]) : String(time)
+        let identity: String
+        switch source {
+        case "indicator": identity = try #require(entryIDs["\(time)|\(message)"])
+        case "tcc": identity = try JSONDecoder().decode(TCCRequest.self, from: Data(message.utf8)).messageID
+        default: identity = String(time)
+        }
         let dedupKey = sha256("\(source)\n\(identity)\n\(message)")
         #expect(id == Int64(index + 1))
         #expect(row["dedup_key"] == dedupKey)

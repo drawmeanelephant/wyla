@@ -6,10 +6,11 @@ import WylaCore
 private let main = "27.3-26C5035r"
 
 private func request(
-    _ identifier: String? = "com.example.app", service: String = "kTCCServiceCamera", authValue: Int = 2, at time: Date
+    _ identifier: String? = "com.example.app", service: String = "kTCCServiceCamera", authValue: Int = 2,
+    messageID: String? = nil, at time: Date
 ) -> TCCRequest {
     TCCRequest(
-        messageID: "1", time: time, service: service,
+        messageID: messageID ?? UUID().uuidString, time: time, service: service,
         responsible: identifier.map { TCCProcess(identifier: $0, pid: 1, binaryPath: nil) },
         accessing: nil, requesting: nil, authValue: authValue)
 }
@@ -45,16 +46,31 @@ private func request(
     #expect(try temporary.store.tccRequestTotals().map(\.client) == [""])
 }
 
-@Test func aBackfilledRequestIsNotCountedTwice() throws {
+@Test func theSameRequestFromBackfillAndTheLiveStreamCountsOnce() throws {
     let temporary = try TemporaryStore()
     let start = Date(timeIntervalSince1970: 1_800_000_000)
     let recorder = try Recorder(store: temporary.store, startingAt: start)
-    try recorder.record(.tccRequest(request(at: start)))
-    // The agent restarts: the checkpoint saved with the count marks the request as counted.
+    let delivered = request(messageID: "msg-42", at: start)
+    try recorder.record(.tccRequest(delivered))
+    // The request reaches the recorder again — `log show` backfill and `log stream` overlap.
+    try recorder.record(.tccRequest(delivered))
+    // And once more after a restart.
     let restarted = try Recorder(store: temporary.store, startingAt: start.addingTimeInterval(5))
-    try restarted.record(.tccRequest(request(at: start)))
-    try restarted.record(.tccRequest(request(at: start.addingTimeInterval(10))))
-    #expect(try temporary.rows("SELECT count FROM tcc_requests_agg").map { $0["count"] as Int }.reduce(0, +) == 2)
+    try restarted.record(.tccRequest(delivered))
+    #expect(try temporary.rows("SELECT count FROM tcc_requests_agg").map { $0["count"] as Int } == [1])
+}
+
+@Test func aRequestCompletedLateIsStillCounted() throws {
+    let temporary = try TemporaryStore()
+    let start = Date(timeIntervalSince1970: 1_800_000_000)
+    let recorder = try Recorder(store: temporary.store, startingAt: start)
+    // A newer event moves the applied-to point past the request's CTX timestamp before the
+    // request's result arrives — the check is slow, its request is not a duplicate.
+    try recorder.record(
+        .indicator(
+            LogEvent(timestamp: start.addingTimeInterval(10), message: "Active activity attributions changed to []", entryID: "1")))
+    try recorder.record(.tccRequest(request(at: start)))
+    #expect(try temporary.rows("SELECT count FROM tcc_requests_agg").map { $0["count"] as Int } == [1])
 }
 
 @Test func totalsGroupTheMinutesPerClientAndService() throws {

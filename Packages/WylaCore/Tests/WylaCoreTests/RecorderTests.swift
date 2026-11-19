@@ -33,10 +33,12 @@ func recordedActivationsMatchSessionBuilder(capture name: String) throws {
     let counts = try temporary.rows("SELECT source, count(*) AS n FROM raw_events GROUP BY source ORDER BY source")
     let indicatorLines = capture.inputs.filter { if case .indicator = $0 { true } else { false } }.count
     let hardwareChanges = capture.inputs.filter { if case .hardware = $0 { true } else { false } }.count
-    // TCC requests are stored only when they link a command-line client to its responsible app.
+    let requests = capture.recorderInputs.filter { if case .tccRequest = $0 { true } else { false } }.count
+    // Every completed TCC request is stored: it feeds the per-minute totals, and a command-line
+    // client's activation links to the request that named its responsible app.
     #expect(
         counts.map { "\($0["source"] as String) \($0["n"] as Int)" } == [
-            "hardware \(hardwareChanges)", "indicator \(indicatorLines)", "tcc 1"
+            "hardware \(hardwareChanges)", "indicator \(indicatorLines)", "tcc \(requests)"
         ])
 }
 
