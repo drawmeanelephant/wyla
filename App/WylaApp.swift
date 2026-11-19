@@ -11,7 +11,7 @@ struct WylaApp: App {
         }
 
         Window("WYLA", id: MainWindow.id) {
-            MainWindow(store: store)
+            MainWindow(store: store, registration: registration)
         }
         .defaultLaunchBehavior(.suppressed)
     }

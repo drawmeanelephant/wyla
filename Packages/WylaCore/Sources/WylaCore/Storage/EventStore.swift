@@ -120,6 +120,7 @@ public final class EventStore: Sendable {
         }
     }
 
+<<<<<<< HEAD
     /// One day's checks of one kind for the Requests history chart.
     public struct TCCDailyCount: Sendable, Equatable, Hashable {
         /// Start of the local day the checks were counted in.
@@ -158,6 +159,58 @@ public final class EventStore: Sendable {
         return days.keys.sorted().flatMap { day in
             (days[day] ?? [:]).sorted { $0.key < $1.key }
                 .map { TCCDailyCount(day: day, result: $0.key, count: $0.value) }
+        }
+    }
+
+    /// The agent's coverage periods, oldest first: each agent run covers the time between its
+    /// start and its last heartbeat. Gaps between them are times nothing was monitoring.
+    public func coverage() throws -> [(start: Date, end: Date)] {
+        try pool.read { db in
+            try Row.fetchAll(db, sql: "SELECT started_us, last_heartbeat_us FROM coverage ORDER BY started_us").map {
+                (Date(microseconds: $0["started_us"]), Date(microseconds: $0["last_heartbeat_us"]))
+            }
+        }
+    }
+
+    /// Every chained `raw_events` column for the rows at or between `start` and `end`, in chain
+    /// order: what an export carries so the chain can be verified without the database.
+    public func chainedEvents(from start: Date, to end: Date) throws -> [ExportedRow] {
+        try pool.read { db in
+            try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT id, time_us, source, message, dedup_key, prev_hash, hash
+                    FROM raw_events WHERE time_us BETWEEN ? AND ? ORDER BY id
+                    """,
+                arguments: [start.microseconds, end.microseconds]
+            ).map {
+                ExportedRow(
+                    id: $0["id"], timeMicros: $0["time_us"], source: $0["source"], dedupKey: $0["dedup_key"],
+                    prevHash: $0["prev_hash"], hash: $0["hash"], message: $0["message"])
+            }
+        }
+    }
+
+    /// How many activations of `client` on `sensor` are stored; `nil` counts unattributed use.
+    /// The agent alerts on the first use of a sensor by an app: the count is one when the
+    /// activation that just started is the first recorded.
+    public func activationCount(sensor: Sensor, client: String?) throws -> Int {
+        try pool.read { db in
+            try Int.fetchOne(
+                db,
+                sql: "SELECT count(*) FROM activations WHERE sensor = ? AND client IS ?",
+                arguments: [sensor.rawValue, client]) ?? 0
+        }
+    }
+
+    /// The stored indicator lines the parser rejects — a sign that a new macOS log format needs a
+    /// fixture and a parser update.
+    public func unparsedIndicatorCount() throws -> Int {
+        let parser = IndicatorParser()
+        return try pool.read { db in
+            try String.fetchAll(db, sql: "SELECT message FROM raw_events WHERE source = 'indicator'")
+                .filter { if case .unparsed = parser.parse($0) { true } else { false } }
+                .count
         }
     }
 

@@ -27,10 +27,12 @@ func lockDatabase(at url: URL) {
     }
 }
 
-/// `--verify` checks the hash chain, prints the result, and exits with status 1 if it is broken.
+/// `--verify` checks the hash chain against the latest anchor exported by `anchorExportEnabled`,
+/// prints the result, and exits with status 1 if it is broken.
 func verify(_ url: URL) -> Never {
     do {
-        let report = try EventStore(url: url).verifyIntegrity()
+        let anchor = try AnchorLog.latest(from: AnchorLog.url(near: url))
+        let report = try EventStore(url: url).verifyIntegrity(anchor: anchor)
         if let problem = report.problem {
             print("BROKEN at row \(problem.firstBadRow): \(problem) (\(report.verifiedRows) rows verified before it)")
             exit(EXIT_FAILURE)
@@ -43,10 +45,56 @@ func verify(_ url: URL) -> Never {
     }
 }
 
+/// `--export <from> <to> <directory>` writes the date range's raw events and sessions as CSV and
+/// JSON into the directory, and `--verify-export <directory>` checks such an export's chain.
+/// Dates are ISO 8601 (for example `2026-11-19` or `2026-11-19T12:30:00Z`).
+func exportIfAsked(_ url: URL) {
+    let arguments = CommandLine.arguments
+    if let flag = arguments.firstIndex(of: "--export"), arguments.indices.contains(flag + 3) {
+        let day = DateFormatter()
+        day.dateFormat = "yyyy-MM-dd"
+        let iso = ISO8601DateFormatter()
+        guard let from = day.date(from: arguments[flag + 1]) ?? iso.date(from: arguments[flag + 1]),
+            let end = day.date(from: arguments[flag + 2]) ?? iso.date(from: arguments[flag + 2])
+        else {
+            print("ERROR: dates are ISO 8601 (for example 2026-11-19 or 2026-11-19T12:30:00Z)")
+            exit(EXIT_FAILURE)
+        }
+        do {
+            let directory = URL(filePath: arguments[flag + 3])
+            let manifest = try AuditExport.write(store: EventStore(url: url), from: from, to: end, to: directory)
+            print("Exported \(manifest.rowCount) events and \(manifest.sessionCount) sessions to \(directory.path(percentEncoded: false))")
+            exit(EXIT_SUCCESS)
+        } catch {
+            print("ERROR: \(error)")
+            exit(EXIT_FAILURE)
+        }
+    }
+    if let flag = arguments.firstIndex(of: "--verify-export"), arguments.indices.contains(flag + 1) {
+        do {
+            let report = try AuditExport.verify(directory: URL(filePath: arguments[flag + 1]))
+            if let problem = report.problem {
+                print("BROKEN at row \(problem.firstBadRow): \(problem) (\(report.verifiedRows) rows verified before it)")
+                exit(EXIT_FAILURE)
+            }
+            if report.headMismatch {
+                print("BROKEN: the chain ends at a different head than the manifest records")
+                exit(EXIT_FAILURE)
+            }
+            print("OK: \(report.verifiedRows) rows")
+            exit(EXIT_SUCCESS)
+        } catch {
+            print("ERROR: \(error)")
+            exit(EXIT_FAILURE)
+        }
+    }
+}
+
 let url = databaseURL()
 if CommandLine.arguments.contains("--verify") {
     verify(url)
 }
+exportIfAsked(url)
 logger.notice("WylaAgent started (database \(url.path(percentEncoded: false), privacy: .private))")
 let collector: Collector
 do {
