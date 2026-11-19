@@ -18,6 +18,8 @@ struct MainWindow: View {
                     .tabItem { Label("Timeline", systemImage: "list.bullet.rectangle") }
                 AppsView(store: store)
                     .tabItem { Label("Apps", systemImage: "square.grid.2x2") }
+                RequestsView(store: store)
+                    .tabItem { Label("Requests", systemImage: "lock.shield") }
             }
             .frame(minWidth: 760, minHeight: 480)
         }

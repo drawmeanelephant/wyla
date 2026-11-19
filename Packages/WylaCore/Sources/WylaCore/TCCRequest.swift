@@ -39,14 +39,7 @@ public struct TCCRequest: Sendable, Equatable, Codable {
         self.authValue = authValue
     }
 
-    public var sensor: Sensor? {
-        switch service {
-        case "kTCCServiceCamera": .camera
-        case "kTCCServiceMicrophone": .microphone
-        case "kTCCServiceScreenCapture": .screen
-        default: nil
-        }
-    }
+    public var sensor: Sensor? { Sensor(tccService: service) }
 
     /// The app TCC holds responsible. TCC omits `responsible` when a process is its own
     /// responsible process, and omits `accessing` when the app checks its own access.

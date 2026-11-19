@@ -24,6 +24,7 @@ final class Store {
     private(set) var activations: [Activation] = []
     private(set) var sessions: [Session] = []
     private(set) var apps: [String: StoredApp] = [:]
+    private(set) var requests: [TCCSummary] = []
     /// Set when the database can't be opened or read.
     private(set) var loadError: String?
 
@@ -93,6 +94,7 @@ final class Store {
         let activations: [Activation]
         let sessions: [Session]
         let apps: [String: StoredApp]
+        let requests: [TCCSummary]
         let heartbeat: Date?
     }
 
@@ -121,6 +123,7 @@ final class Store {
                     activations: activations,
                     sessions: SessionMerger.merge(activations),
                     apps: Dictionary(try store.apps().map { ($0.client, $0) }, uniquingKeysWith: { first, _ in first }),
+                    requests: try store.tccRequestTotals(),
                     heartbeat: try store.lastHeartbeat())
             } catch {
                 await self?.finishReload(result: .failure(error))
@@ -137,6 +140,7 @@ final class Store {
             activations = snapshot.activations
             sessions = snapshot.sessions
             apps = snapshot.apps
+            requests = snapshot.requests
             lastHeartbeat = snapshot.heartbeat
             loadError = nil
             refreshLiveness()
@@ -198,6 +202,17 @@ final class Store {
 
     func icon(of app: AppSummary) -> NSImage {
         Self.icon(for: app.client.flatMap { apps[$0] })
+    }
+
+    /// The name to show for a requesting client: its `apps` name when resolved, else the raw
+    /// identifier or "Unknown" when TCC named no process.
+    func name(of request: TCCSummary) -> String {
+        if request.client.isEmpty { return "Unknown" }
+        return apps[request.client]?.name ?? request.client
+    }
+
+    func icon(of request: TCCSummary) -> NSImage {
+        Self.icon(for: apps[request.client])
     }
 
     /// The app's icon when its bundle resolves to the client, a generic app icon otherwise.

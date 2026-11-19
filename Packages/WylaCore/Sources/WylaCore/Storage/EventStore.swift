@@ -100,6 +100,26 @@ public final class EventStore: Sendable {
         }
     }
 
+    /// Permission-check totals per client and service, summed over `tcc_requests_agg`'s
+    /// one-minute buckets, most-checked first.
+    public func tccRequestTotals() throws -> [TCCSummary] {
+        try pool.read { db in
+            try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT client, service,
+                        ifnull(sum(CASE WHEN auth_value = 0 THEN count END), 0) AS denied,
+                        ifnull(sum(CASE WHEN auth_value = 1 THEN count END), 0) AS unknown,
+                        ifnull(sum(CASE WHEN auth_value = 2 THEN count END), 0) AS allowed,
+                        ifnull(sum(CASE WHEN auth_value = 3 THEN count END), 0) AS limited,
+                        min(minute_us) AS first_us, max(minute_us) AS last_us,
+                        sum(count) AS total
+                    FROM tcc_requests_agg GROUP BY client, service ORDER BY total DESC, client, service
+                    """
+            ).map(TCCSummary.init(row:))
+        }
+    }
+
     /// The last heartbeat the agent saved, or nil if it never ran. An old heartbeat means the
     /// agent is dead, so the viewer doesn't treat the open activations it left behind as live.
     public func lastHeartbeat() throws -> Date? {
