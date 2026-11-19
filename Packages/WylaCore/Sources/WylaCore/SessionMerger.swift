@@ -17,7 +17,22 @@ public struct Session: Sendable, Equatable {
         var seen = Set<String>()
         return activations.compactMap(\.device).filter { seen.insert($0).inserted }
     }
+
+    /// Seconds from the session's start to its end, or to `now` while it is still running.
+    public func duration(asOf now: Date) -> TimeInterval {
+        (end ?? now).timeIntervalSince(start)
+    }
+
+    /// The `raw_events` rows behind the session's activations.
+    public var eventIDs: [Int64] {
+        activations.flatMap { [$0.startEventID, $0.endEventID, $0.responsibleEventID] }.compactMap(\.self)
+    }
+
+    /// Identified by its first activation.
+    public var id: String { activations[0].id }
 }
+
+extension Session: Identifiable {}
 
 public enum SessionMerger {
     public static let defaultWindow: TimeInterval = 2

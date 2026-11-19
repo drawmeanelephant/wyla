@@ -35,6 +35,9 @@ extension Activation {
         }
         deviceUse = try JSONDecoder().decode([String: TimeInterval].self, from: Data((row["device_use"] as String).utf8))
         deviceUseCountedUntil = Date(microseconds: row["device_use_until_us"])
+        startEventID = row["start_event_id"]
+        endEventID = row["end_event_id"]
+        responsibleEventID = row["responsible_event_id"]
     }
 
     /// Inserts a started activation. Inserting one that is already stored does nothing.
