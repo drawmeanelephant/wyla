@@ -35,7 +35,7 @@ Run `make help` for the full list.
 
 ## Verifying a change
 
-Run `make check` before opening a pull request. If the change affects the UI, also run `make qa`. The `wyla-verify-change` skill in `.factory/skills/` has the full procedure, and `wyla-log-fixture` covers capturing system log fixtures.
+Run `make check` before opening a pull request. If the change affects the UI, also run `make qa`. If it affects the collector (`Agent/`, `Recorder`, `SessionBuilder`, or the log parsers), also run `IntegrationTests/live-sessions.sh build/DerivedData/Build/Products/Debug/Wyla.app`, which uses the real camera and screen (see `docs/RUNBOOK.md`). The `wyla-verify-change` skill in `.factory/skills/` has the full procedure, and `wyla-log-fixture` covers capturing system log fixtures.
 
 ## Environment and secrets
 

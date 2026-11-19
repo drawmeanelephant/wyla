@@ -164,6 +164,54 @@ private struct InterruptedRun {
     )
 }
 
+@Test func killedAgentKeepsTheDeviceUseItSawBeforeItsFirstHeartbeat() throws {
+    let temporary = try TemporaryStore()
+    let start = Date(timeIntervalSince1970: 1_800_000_000)
+    let photoBooth = #"Active activity attributions changed to ["cam:com.apple.PhotoBooth"]"#
+    let first = try Recorder(store: temporary.store, startingAt: start)
+    for device in ["Desk View Camera", "MacBook Pro Camera"] {
+        try first.record(.hardware(HardwareChange(time: start.addingTimeInterval(1), sensor: .camera, device: device, isRunning: true)))
+    }
+    try first.record(.indicator(LogEvent(timestamp: start.addingTimeInterval(1.5), message: photoBooth, entryID: "1")))
+    try first.record(
+        .hardware(HardwareChange(time: start.addingTimeInterval(2), sensor: .camera, device: "Desk View Camera", isRunning: false)))
+    try first.record(.indicator(LogEvent(timestamp: start.addingTimeInterval(4), message: photoBooth, entryID: "2")))
+
+    // Killed before its first heartbeat, so the open activation's device use was never saved.
+    let second = try Recorder(store: temporary.store, startingAt: start.addingTimeInterval(10))
+    try second.record(.indicator(LogEvent(timestamp: start.addingTimeInterval(6), message: "Active activity attributions changed to []")))
+
+    let activation = try #require(try temporary.store.activations().first)
+    #expect(activation.end == start.addingTimeInterval(6))
+    #expect(activation.device == "MacBook Pro Camera")
+    #expect(activation.deviceUse.mapValues { ($0 * 10).rounded() / 10 } == ["Desk View Camera": 0.5, "MacBook Pro Camera": 2.5])
+}
+
+@Test func backfillFromBeforeThePreviousRunStoresOlderEventsWithoutEndingActivations() throws {
+    let temporary = try TemporaryStore()
+    let start = Date(timeIntervalSince1970: 1_800_000_000)
+    let photoBooth = LogEvent(
+        timestamp: start.addingTimeInterval(5), message: #"Active activity attributions changed to ["cam:com.apple.PhotoBooth"]"#,
+        entryID: "2")
+    let empty = { (seconds: TimeInterval, entry: String) in
+        RecorderInput.indicator(
+            LogEvent(timestamp: start.addingTimeInterval(seconds), message: "Active activity attributions changed to []", entryID: entry))
+    }
+    try Recorder(store: temporary.store, startingAt: start).record(.indicator(photoBooth))
+
+    // The previous run was killed before its first heartbeat, so the backfill starts before it began.
+    let second = try Recorder(store: temporary.store, startingAt: start.addingTimeInterval(10))
+    try second.record([empty(-5, "1"), .indicator(photoBooth), empty(8, "3")])
+
+    let activations = try temporary.store.activations()
+    #expect(
+        activations.map { "\($0.client ?? "-") \(clock($0.start)) \(clock($0.end)) \($0.endReason?.rawValue ?? "-")" } == [
+            "com.apple.PhotoBooth 03:00:05.000 03:00:08.000 stopped"
+        ])
+    #expect(try temporary.rows("SELECT id FROM raw_events").count == 3)
+    #expect(second.lateInputs == 1)
+}
+
 @Test func unattributedHardwareUseIsStoredWithItsHardwareEvents() throws {
     let temporary = try TemporaryStore()
     let start = Date(timeIntervalSince1970: 1_800_000_000)

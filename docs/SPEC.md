@@ -68,15 +68,23 @@ Over 206 s: the indicator stream used 0.03 s of CPU (under 0.1%), the TCC Info-l
 
 ```
 Wyla.app (SwiftUI: menu bar + window) ── reads ──▶ SQLite (WAL) ◀── writes ── WylaAgent (launchd, KeepAlive)
-                                                                               ├─ log stream: Control Center indicators
-                                                                               ├─ log stream --info: TCC permission requests
+                                                                               ├─ log stream --info: Control Center indicators + TCC requests
                                                                                ├─ CoreMediaIO listener (camera hardware on/off)
                                                                                └─ CoreAudio listener (mic hardware on/off)
 WylaCore (Swift package): models, parsers, session builder, store, hash chain
 ```
 
-- The agent is embedded in `Wyla.app/Contents/MacOS/WylaAgent` and registered with `SMAppService.agent(plistName:)`. launchd restarts it if it crashes.
-- The agent posts a Darwin notification after each write so the app refreshes.
+- The agent is embedded in `Wyla.app/Contents/MacOS/WylaAgent` and registered with `SMAppService.agent(plistName:)` when the app starts. If macOS needs the user's approval, the menu shows that and opens Login Items settings. launchd restarts the agent if it exits.
+- The agent posts the Darwin notification `io.github.drawmeanelephant.wyla.changed` after a batch of writes so the app refreshes.
+
+### Collector
+
+- One `log stream --style ndjson --info` process reads both log sources, with a predicate that matches the Control Center `sensor-indicators` category or the TCC `access` category. `LogRouter` sends each line to its parser. If `log stream` exits, the agent restarts it after 1 s, doubling up to 60 s, and starts over at 1 s after a run of at least 60 s.
+- When `log stream` prints its banner, the agent backfills with `log show --start` from the latest checkpoint minus 10 s. Without a checkpoint it starts from the previous run's last heartbeat. Events that are already stored are skipped (see `dedup_key`).
+- CoreMediaIO and CoreAudio property listeners report devices that are added or removed and devices that start or stop running. The agent rescans every 30 s in case a callback was missed. A microphone is a device with input streams and no output streams. A headset with both runs whenever it plays sound, so its running state says nothing about the microphone, and WYLA does not use it as a cross-check.
+- Backfilled, live, and hardware inputs pass through a reorder buffer that holds them for 1 s and releases them in time order. The buffer is not released during a backfill. `Recorder` stores a new input that is older than one it already applied, but the input doesn't change activations. This happens when the backfill reaches back before the time the previous run began, and the agent logs the count with each regular heartbeat.
+- The agent looks up each new client with Launch Services and the code signature: name, path, and Team ID. Clients without a dot are command-line executables and are marked as such.
+- A lock file next to the database (`wyla.sqlite.lock`) keeps a second agent from recording into the same database. `WylaAgent --database <path>` uses another database, for tests, and `WylaAgent --verify` checks the hash chain and prints `OK` or `BROKEN`.
 - WYLA is not sandboxed, because the sandbox blocks reading the system log. It makes no network connections.
 
 ## Data sources
@@ -85,7 +93,7 @@ WylaCore (Swift package): models, parsers, session builder, store, hash chain
 |---|---|---|---|
 | Control Center `sensor-indicators` log | Start and stop per sensor per app | Bundle ID or executable name | Main source. Undocumented format that can change with macOS updates. |
 | CoreMediaIO `kCMIODevicePropertyDeviceIsRunningSomewhere` | Camera hardware on/off, device name | None | Public API, used as a cross-check |
-| CoreAudio `kAudioDevicePropertyDeviceIsRunningSomewhere` | Microphone hardware on/off, device name | None | Public API, used as a cross-check |
+| CoreAudio `kAudioDevicePropertyDeviceIsRunningSomewhere` | Microphone hardware on/off, device name | None | Public API, used as a cross-check for input-only devices |
 | TCC `com.apple.TCC:access` log (info level) | Permission requests and allow/deny results | Through `AUTHREQ_ATTRIBUTION` | High volume, stored as per-minute totals (M6) |
 | TCC.db (optional) | Which apps hold each permission, and when it changed | Bundle ID | Requires Full Disk Access (M6) |
 
@@ -96,7 +104,8 @@ WylaCore (Swift package): models, parsers, session builder, store, hash chain
 - Camera or microphone hardware that runs while no attributed activation of that sensor is open is uncovered. Uncovered time becomes an unattributed activation, starting when it began, once it lasts 3 s, or at once if the hardware turns off before any attribution arrives. Uncovered time after an attributed activation that ends with the hardware turning off within 3 s is the normal shutdown lag (up to 344 ms in M0) and records nothing.
 - An activation's device is the device of its sensor that ran longest during it. A merged session lists every device its activations used.
 - A command-line client (an executable name, which has no dot) is linked to the responsible app of the latest TCC request for the same sensor in the 0.5 s before it started. Requests whose responsible app is already attributed are skipped.
-- When the agent starts, it closes sessions left open. If the stop is still in the system log, backfill finds it. Otherwise the session ends at the last heartbeat, or at its start if it began after that heartbeat, with `end_reason = agent_restart`.
+- When the agent starts, it resumes sessions left open. If the stop is still in the system log, backfill finds it. If the last heartbeat is more than a day old, the system log no longer has the stop, so the session ends at that heartbeat, or at its start if it began after that heartbeat, with `end_reason = agent_restart`.
+- Device use that the previous run didn't save before it stopped is counted again from its stored hardware events, up to its last heartbeat or the last event it stored, whichever is later. The hardware state while no agent runs is unknown and is not counted.
 - `WylaCore` implements these rules: `IndicatorParser` and `TCCRequestAssembler` parse the log lines, `SessionBuilder` produces activations, `Recorder` stores them with their raw events in `EventStore`, and `SessionMerger` joins them into sessions.
 
 ## Data model (SQLite through GRDB)
@@ -108,22 +117,22 @@ The database is `~/Library/Application Support/io.github.drawmeanelephant.wyla/w
   - `hardware`: a camera or microphone device turning on or off, as `<sensor> <device> on|off`.
   - `tcc`: the TCC request that linked a command-line client to its responsible app, as JSON. Other TCC requests are not stored here (see `tcc_requests_agg`).
 - `activations`: one row per activation (the timeline merges them into sessions when it reads them). Columns: `sensor`, `client` (bundle ID, executable name, or NULL when unattributed), `start_us`, `end_us` (NULL while open), `end_reason` (`stopped`, `agent_restart`), `display_name`, `device`, `device_use` (JSON seconds per device), the responsible app's identifier, pid, and path, and links to the raw events that started and ended the activation and that named its responsible app. `(sensor, client, start_us)` is unique.
-- `apps`: client ID, name, path, signing Team ID (filled from M4), first seen, last seen.
+- `apps`: client ID, name, path, signing Team ID, first seen, last seen, and `command_line` (1 for executable names, added by migration `v2`).
 - `tcc_requests_agg`: one-minute bucket, client, service, result, count (filled from M6).
 - `coverage`: one row per agent run, with its start and its last heartbeat. A gap between one run's last heartbeat and the next run's start is time when WYLA was not monitoring.
 - `checkpoints`: per log source, the latest log timestamp the agent processed. Backfill resumes from it.
 
-`Recorder` writes each input in one transaction: the raw event, then the activation changes that `SessionBuilder` derives from it. An input whose `dedup_key` is already stored is skipped before it reaches the builder, so a backfill that overlaps recorded events changes nothing. After a restart, `Recorder` resumes the activations whose `end_us` is NULL.
+`Recorder` writes each input in one transaction: the raw event, then the activation changes that `SessionBuilder` derives from it. An input whose `dedup_key` is already stored is skipped before it reaches the builder, so a backfill that overlaps recorded events changes nothing. A new input older than the latest one applied is stored, but not passed to the builder, so inputs reach it in time order. After a restart, `Recorder` resumes the activations whose `end_us` is NULL.
 
 ## Audit guarantees
 
 - Every activation links to the raw events that started and ended it.
 - Database triggers reject UPDATE and DELETE on `raw_events`, and any INSERT that doesn't extend the chain (its `id` must be the next id and its `prev_hash` the last row's hash).
 - Each `raw_events` row's SHA-256 hash covers the previous row's hash. Hashes are lowercase hex SHA-256 of UTF-8 text:
-  - `dedup_key = sha256("<source>\n<time_us>\n<message>")`
+  - `dedup_key = sha256("<source>\n<identity>\n<message>")`. The identity of an `indicator` row is its log entry's `machTimestamp` in decimal: `log stream` and `log show` report the same entry with wall-clock times up to a few ms apart, but the same mach time, and `log stream` leaves `bootUUID` empty. The identity of other rows is `<time_us>`.
   - `hash = sha256("<id>\n<time_us>\n<source>\n<dedup_key>\n<prev_hash>\n<message>")`, with 64 zeros as the first row's `prev_hash`
 - "Verify integrity" (`EventStore.verifyIntegrity`) recomputes the chain and reports the first bad row: missing ids (a deleted row), a `prev_hash` that doesn't match (an inserted or replaced row), or a hash that doesn't match (an edited row).
-- The agent writes a heartbeat every 30 s. After a restart it backfills from its last checkpoint with `log show --start`, which covers gaps of up to about a day. Longer gaps appear in the UI as "not monitoring from X to Y".
+- The agent writes a heartbeat every 30 s, and every 5 s while an activation is open. Each heartbeat saves the checkpoints and the open activations' device use. After a restart it backfills from its last checkpoint with `log show --start`, which covers gaps of up to about a day. Longer gaps appear in the UI as "not monitoring from X to Y".
 - Limit: this detects edits and gaps. It can't stop an admin from rewriting the whole chain, or from removing rows at the end. Saving the chain head (`EventStore.head()`, an id and hash) outside the database, for example in a daily export, makes such a rewrite detectable: `verifyIntegrity(anchor:)` reports when the chain no longer contains that row unchanged.
 
 ## UI

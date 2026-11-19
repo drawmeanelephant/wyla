@@ -82,11 +82,14 @@ private enum App {
     static func saw(_ client: String, name: String?, path: String?, at time: Date, in db: Database) throws {
         try db.execute(
             sql: """
-                INSERT INTO apps (client, name, path, first_seen_us, last_seen_us) VALUES (?, ?, ?, ?, ?)
+                INSERT INTO apps (client, name, path, first_seen_us, last_seen_us, command_line) VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT (client) DO UPDATE SET name = ifnull(excluded.name, name), path = ifnull(excluded.path, path),
                     first_seen_us = min(first_seen_us, excluded.first_seen_us),
                     last_seen_us = max(last_seen_us, excluded.last_seen_us)
                 """,
-            arguments: [client, name, path, time.microseconds, time.microseconds])
+            arguments: [
+                client, name, path, time.microseconds, time.microseconds,
+                Attribution(sensor: .camera, client: client).isExecutableName
+            ])
     }
 }

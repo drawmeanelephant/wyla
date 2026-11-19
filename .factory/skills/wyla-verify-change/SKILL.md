@@ -18,7 +18,14 @@ Run these steps from the repository root, in order. Stop at the first failure an
    ```
 
    The script opens the menu, opens the main window, checks its text, and quits through the menu. It needs Accessibility permission for the process that runs it. If it fails with an Accessibility error, tell the user to grant it in System Settings > Privacy & Security > Accessibility. Do not skip the step silently. When you change the window's text, update the check in `scripts/qa-drive.sh`.
-5. If the change touches a system log parser, confirm there is a fixture test for every log format the parser accepts (see the `wyla-log-fixture` skill).
+5. If the change affects the collector (`Agent/`, `Recorder`, `SessionBuilder`, or the log parsers), run the live check after `make build`:
+
+   ```sh
+   IntegrationTests/live-sessions.sh build/DerivedData/Build/Products/Debug/Wyla.app
+   ```
+
+   It opens Photo Booth twice, kills the agent mid-session, and takes a screenshot, using a temporary database. It needs a camera and Photo Booth's camera permission. Read the printed indicator lines before blaming the code for a failed session: macOS sometimes doesn't log Control Center's attribution line, and the check then reports an unattributed activation.
+6. If the change touches a system log parser, confirm there is a fixture test for every log format the parser accepts (see the `wyla-log-fixture` skill).
 
 ## Reading failures
 
