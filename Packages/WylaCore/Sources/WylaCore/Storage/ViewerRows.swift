@@ -56,3 +56,49 @@ public struct RawEvent: Sendable, Equatable {
 }
 
 extension RawEvent: Identifiable {}
+
+/// Per-client totals of one TCC service's permission checks, grouped from `tcc_requests_agg`.
+public struct TCCSummary: Sendable, Equatable {
+    /// The app TCC held responsible, or "" when the request named no process.
+    public let client: String
+    /// The TCC service, for example `kTCCServiceCamera`.
+    public let service: String
+    /// Checks by result: TCC authValue 0 denied, 1 unknown, 2 allowed, 3 limited.
+    public let denied: Int
+    public let unknown: Int
+    public let allowed: Int
+    public let limited: Int
+    /// The one-minute buckets the checks were counted in.
+    public let firstSeen: Date
+    public let lastSeen: Date
+
+    public init(
+        client: String, service: String, denied: Int, unknown: Int, allowed: Int, limited: Int,
+        firstSeen: Date, lastSeen: Date
+    ) {
+        self.client = client
+        self.service = service
+        self.denied = denied
+        self.unknown = unknown
+        self.allowed = allowed
+        self.limited = limited
+        self.firstSeen = firstSeen
+        self.lastSeen = lastSeen
+    }
+
+    init(row: Row) {
+        self.init(
+            client: row["client"], service: row["service"], denied: row["denied"], unknown: row["unknown"],
+            allowed: row["allowed"], limited: row["limited"],
+            firstSeen: Date(microseconds: row["first_us"]), lastSeen: Date(microseconds: row["last_us"]))
+    }
+
+    public var total: Int { denied + unknown + allowed + limited }
+
+    /// The sensor the service guards, when it is one WYLA watches.
+    public var sensor: Sensor? { Sensor(tccService: service) }
+}
+
+extension TCCSummary: Identifiable {
+    public var id: String { "\(client)/\(service)" }
+}

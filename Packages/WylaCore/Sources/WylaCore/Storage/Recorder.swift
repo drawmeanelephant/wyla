@@ -32,6 +32,9 @@ public final class Recorder {
     private let parser = IndicatorParser()
     private var builder: SessionBuilder
     private var checkpoints: [RawEventSource: Date] = [:]
+    /// The `.tcc` checkpoint saved before this run started. Requests at or before it were counted
+    /// by an earlier run, so a backfill that replays them must not count them again.
+    private let resumedTCCCheckpoint: Date?
     /// Ids of recently stored raw events by time, to link activations to the events that started
     /// and ended them.
     private var recentEvents: [Int64: Int64] = [:]
@@ -68,6 +71,7 @@ public final class Recorder {
             return (previous.map(Date.init(microseconds:)), runID, builder, checkpoints, applied.map(Date.init(microseconds:)))
         }
         (self.previousHeartbeat, self.runID, self.builder, self.checkpoints) = (previous, runID, builder, checkpoints)
+        resumedTCCCheckpoint = checkpoints[.tcc]
         appliedUntil = applied
     }
 
@@ -109,7 +113,10 @@ public final class Recorder {
         case .tccRequest(let request):
             checkpoints[.tcc] = max(checkpoints[.tcc] ?? time, time)
             recentRequests.append(request)
-            return try apply(nil, .tccRequest(request), at: time)
+            let counted = request.time <= (resumedTCCCheckpoint ?? .distantPast)
+            return try apply(nil, .tccRequest(request), at: time) { db in
+                if !counted { try Self.aggregate(request, in: db) }
+            }
         case .hardware(let change):
             return try apply(RawInput(source: .hardware, time: time, identity: nil, message: change.message), .hardware(change), at: time)
         }
@@ -163,8 +170,13 @@ public final class Recorder {
     }
 
     /// Stores the raw event if it is new, runs the builder, and stores the activation changes, all
-    /// in one transaction. The builder is updated only after the transaction commits.
-    private func apply(_ raw: RawInput?, _ input: BuilderInput?, at time: Date) throws -> [ActivationEvent] {
+    /// in one transaction. The builder is updated only after the transaction commits. `sideEffect`
+    /// adds derived data (the TCC per-minute totals) to the same transaction; it doesn't run for
+    /// late inputs, which would otherwise be counted twice.
+    private func apply(
+        _ raw: RawInput?, _ input: BuilderInput?, at time: Date,
+        sideEffect: ((Database) throws -> Void)? = nil
+    ) throws -> [ActivationEvent] {
         var next = builder
         var events: [ActivationEvent] = []
         var stored: EventStore.Appended?
@@ -183,8 +195,12 @@ public final class Recorder {
             }
         } else {
             events = build()
-            if !events.isEmpty {
-                try write { db in try persist(events, currentEvent: nil, in: db) }
+            let writeSideEffect = !isLate && sideEffect != nil
+            if !events.isEmpty || writeSideEffect {
+                try write { db in
+                    try persist(events, currentEvent: nil, in: db)
+                    if writeSideEffect { try sideEffect?(db) }
+                }
             }
         }
         if let stored {
@@ -217,6 +233,26 @@ public final class Recorder {
                 try activation.save(endEventID: endEventID, in: db)
             }
         }
+    }
+
+    /// Adds the request to its one-minute bucket in `tcc_requests_agg`, and saves the `.tcc`
+    /// checkpoint with it so a crash between the count and the next heartbeat can't recount it.
+    /// The client is the app TCC held responsible, so the totals name the app behind the check
+    /// rather than a daemon such as `replayd` that made it on the app's behalf.
+    private static func aggregate(_ request: TCCRequest, in db: Database) throws {
+        let minute = request.time.microseconds / 60_000_000 * 60_000_000
+        try db.execute(
+            sql: """
+                INSERT INTO tcc_requests_agg (minute_us, client, service, auth_value, count) VALUES (?, ?, ?, ?, 1)
+                ON CONFLICT (minute_us, client, service, auth_value) DO UPDATE SET count = count + 1
+                """,
+            arguments: [minute, request.responsibleApp?.identifier ?? "", request.service, request.authValue])
+        try db.execute(
+            sql: """
+                INSERT INTO checkpoints (source, time_us) VALUES ('tcc', ?)
+                ON CONFLICT (source) DO UPDATE SET time_us = max(time_us, excluded.time_us)
+                """,
+            arguments: [request.time.microseconds])
     }
 
     /// Stores the TCC request that `SessionBuilder` took the activation's responsible app from.

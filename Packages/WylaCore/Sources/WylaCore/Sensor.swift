@@ -13,4 +13,14 @@ public enum Sensor: String, CaseIterable, Codable, Sendable {
         case .screen: "Screen"
         }
     }
+
+    /// The sensor a TCC service guards, when it is one WYLA watches.
+    public init?(tccService service: String) {
+        switch service {
+        case "kTCCServiceCamera": self = .camera
+        case "kTCCServiceMicrophone": self = .microphone
+        case "kTCCServiceScreenCapture": self = .screen
+        default: return nil
+        }
+    }
 }
