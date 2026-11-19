@@ -8,7 +8,6 @@ import os
 /// settings allow it; macOS asks the user for notification permission on the first post.
 enum Notifier {
     private static let logger = Logger(subsystem: "io.github.drawmeanelephant.wyla", category: "notifications")
-    private static var requested = false
 
     /// Posts a notification for the activation that just started, if one is due.
     static func notify(onStart activation: Activation, store: EventStore, settings: Settings) {
@@ -32,25 +31,28 @@ enum Notifier {
 
     private static func post(title: String, body: String, identifier: String) {
         let center = UNUserNotificationCenter.current()
-        if !requested {
-            requested = true
-            center.requestAuthorization(options: [.alert]) { granted, error in
-                if let error {
-                    logger.error("Notification authorization failed: \(error.localizedDescription, privacy: .public)")
+        // Authorization state lives in the notification center, so there is no flag to keep.
+        center.getNotificationSettings { status in
+            if status.authorizationStatus == .notDetermined {
+                center.requestAuthorization(options: [.alert]) { granted, error in
+                    if let error {
+                        logger.error("Notification authorization failed: \(error.localizedDescription, privacy: .public)")
+                    }
+                    if granted {
+                        post(title: title, body: body, identifier: identifier)
+                    }
                 }
-                if granted {
-                    post(title: title, body: body, identifier: identifier)
-                }
+                return
             }
-            return
-        }
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
-        center.add(request) { error in
-            if let error {
-                logger.error("Notification post failed: \(error.localizedDescription, privacy: .public)")
+            guard status.authorizationStatus == .authorized else { return }
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
+            center.add(request) { error in
+                if let error {
+                    logger.error("Notification post failed: \(error.localizedDescription, privacy: .public)")
+                }
             }
         }
     }
