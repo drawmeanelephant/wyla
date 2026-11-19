@@ -6,31 +6,37 @@ import WylaCore
 /// log, merged in time order the way the agent will merge its live sources.
 struct CaptureFixture {
     let inputs: [BuilderInput]
+    /// The same capture as recorder inputs, including the indicator lines the parser ignores.
+    let recorderInputs: [RecorderInput]
     let unparsed: [String]
 
     /// `name` is the fixture suffix after the source, for example `27.3-26C5035r` or
     /// `continuity-27.3-26C5035r`.
     init(_ name: String) throws {
-        var inputs: [BuilderInput] = []
+        var entries: [(recorded: RecorderInput, built: BuilderInput?)] = []
         var unparsed: [String] = []
         let parser = IndicatorParser()
         for event in try Self.events("sensor-indicators-\(name)") {
             switch parser.parse(event.message) {
-            case .event(let indicator): inputs.append(.indicator(indicator, time: event.timestamp))
-            case .ignored: break
-            case .unparsed(let reason): unparsed.append(reason)
+            case .event(let indicator): entries.append((.indicator(event), .indicator(indicator, time: event.timestamp)))
+            case .ignored: entries.append((.indicator(event), nil))
+            case .unparsed(let reason):
+                entries.append((.indicator(event), nil))
+                unparsed.append(reason)
             }
         }
         var assembler = TCCRequestAssembler()
         for event in try Self.events("tcc-access-\(name)") {
             switch assembler.consume(event) {
-            case .event(let request): inputs.append(.tccRequest(request))
+            case .event(let request): entries.append((.tccRequest(request), .tccRequest(request)))
             case .ignored: break
             case .unparsed(let reason): unparsed.append(reason)
             }
         }
-        inputs += try Self.hardwareChanges("hardware-probe-\(name)").map(BuilderInput.hardware)
-        self.inputs = inputs.enumerated().sorted { ($0.element.time, $0.offset) < ($1.element.time, $1.offset) }.map(\.element)
+        entries += try Self.hardwareChanges("hardware-probe-\(name)").map { (.hardware($0), .hardware($0)) }
+        let sorted = entries.enumerated().sorted { ($0.element.recorded.time, $0.offset) < ($1.element.recorded.time, $1.offset) }
+        self.inputs = sorted.compactMap(\.element.built)
+        self.recorderInputs = sorted.map(\.element.recorded)
         self.unparsed = unparsed
     }
 

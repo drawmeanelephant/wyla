@@ -31,6 +31,15 @@ Stream them live while you reproduce a problem:
 log stream --style compact --predicate 'subsystem == "io.github.drawmeanelephant.wyla"'
 ```
 
+Inspect the database read-only (`sqlite3` ships with macOS):
+
+```sh
+sqlite3 -readonly ~/Library/Application\ Support/io.github.drawmeanelephant.wyla/wyla.sqlite \
+  'SELECT count(*) FROM raw_events; SELECT * FROM coverage ORDER BY id DESC LIMIT 3;'
+```
+
+The last `coverage` row's `last_heartbeat_us` should be less than 30 s old while the agent runs. Don't open the database for writing: `raw_events` rejects changes, and editing other tables can break the links that the integrity check relies on.
+
 ## Common problems
 
 ### The agent is not running
@@ -41,7 +50,7 @@ log stream --style compact --predicate 'subsystem == "io.github.drawmeanelephant
 
 ### Activity is missing from the log
 
-1. Check that the agent was running at that time. WYLA records monitoring gaps from M3, and the viewer shows them.
+1. Check that the agent was running at that time. Each agent run is a row in the `coverage` table, and the viewer shows the gaps between runs (from M5).
 2. A macOS update can change the system log lines that WYLA reads. Record a fresh capture with `scripts/capture-sensor-logs.sh` while you use each sensor, compare it with the fixtures and `docs/SPEC.md` ("Findings from the M0 spike"), and open a "Log format change" issue. Scrub personal data from anything you attach.
 
 ### The build or a check fails

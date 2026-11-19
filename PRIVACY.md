@@ -18,7 +18,7 @@ WYLA does not record audio, video, screen contents, or keystrokes. It never read
 
 The data stays on your Mac. WYLA makes no network connections, has no telemetry or analytics, and has no crash reporter that sends data. The project's rules forbid adding code or dependencies that use the network (see `AGENTS.md`).
 
-The database is planned for `~/Library/Application Support/io.github.drawmeanelephant.wyla/` (from M3). Only your user account can read it. The agent also writes its own diagnostic messages to the macOS unified log under the subsystem `io.github.drawmeanelephant.wyla`. Those messages contain app identifiers and sensor names, and macOS removes them on its normal log schedule.
+The database is `~/Library/Application Support/io.github.drawmeanelephant.wyla/wyla.sqlite`. The folder and the database files are readable only by your user account (modes 0700 and 0600). The agent also writes its own diagnostic messages to the macOS unified log under the subsystem `io.github.drawmeanelephant.wyla`. Those messages contain app identifiers and sensor names, and macOS removes them on its normal log schedule.
 
 ## Retention
 
