@@ -21,6 +21,9 @@ opt_in_rules:
 analyzer_rules:
   - unused_declaration
   - unused_import
+identifier_name:
+  # GRDB names its database connection parameter `db`.
+  excluded: [db, id]
 line_length:
   warning: 140
   error: 200

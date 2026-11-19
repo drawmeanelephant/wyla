@@ -14,7 +14,7 @@ public struct TCCProcess: Hashable, Sendable, Codable {
 }
 
 /// One TCC access check, joined from its `AUTHREQ_CTX`, `AUTHREQ_ATTRIBUTION`, and `AUTHREQ_RESULT` lines.
-public struct TCCRequest: Sendable, Equatable {
+public struct TCCRequest: Sendable, Equatable, Codable {
     public let messageID: String
     /// The time of the `AUTHREQ_CTX` line.
     public let time: Date

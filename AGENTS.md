@@ -48,7 +48,7 @@ Run `make check` before opening a pull request. If the change affects the UI, al
 - Swift 6 language mode with complete concurrency checking. Fix warnings instead of suppressing them.
 - The deployment target is macOS 26.0 so that CI (Xcode 26 on `macos-26` runners) and local Xcode 27 build the same code.
 - System log parsers are versioned by macOS release. Every format a parser accepts needs a fixture test in `Packages/WylaCore/Tests/WylaCoreTests/Fixtures/`, captured with `scripts/capture-sensor-logs.sh`, scrubbed, and named `<source>-<macOS version>-<build>.ndjson`. `FixtureTests.swift` enforces the name, the format, and the absence of home directory paths.
-- Persisted identifiers (enum raw values, table and column names) are part of the on-disk format. Changing one requires a migration.
+- Persisted identifiers (enum raw values, table and column names) are part of the on-disk format. Changing one requires a new migration in `Packages/WylaCore/Sources/WylaCore/Storage/Schema.swift`; never edit a registered migration. The hash chain format in `docs/SPEC.md` ("Audit guarantees") is on-disk format too.
 - WYLA never makes network connections. Don't add code or dependencies that do.
 - Add third-party dependencies through SwiftPM only, and only where the spec calls for them (GRDB in M3).
 

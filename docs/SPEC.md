@@ -97,23 +97,34 @@ WylaCore (Swift package): models, parsers, session builder, store, hash chain
 - An activation's device is the device of its sensor that ran longest during it. A merged session lists every device its activations used.
 - A command-line client (an executable name, which has no dot) is linked to the responsible app of the latest TCC request for the same sensor in the 0.5 s before it started. Requests whose responsible app is already attributed are skipped.
 - When the agent starts, it closes sessions left open. If the stop is still in the system log, backfill finds it. Otherwise the session ends at the last heartbeat, or at its start if it began after that heartbeat, with `end_reason = agent_restart`.
-- `WylaCore` implements these rules: `IndicatorParser` and `TCCRequestAssembler` parse the log lines, `SessionBuilder` produces activations, and `SessionMerger` joins them into sessions.
+- `WylaCore` implements these rules: `IndicatorParser` and `TCCRequestAssembler` parse the log lines, `SessionBuilder` produces activations, `Recorder` stores them with their raw events in `EventStore`, and `SessionMerger` joins them into sessions.
 
 ## Data model (SQLite through GRDB)
 
-- `raw_events`: timestamp, source, parsed fields, raw message, dedup key, `prev_hash`, `hash`. Rows can only be added.
-- `sessions`: sensor, client (bundle ID or executable name), device, start, end, duration, `end_reason` (`stopped`, `agent_restart`, `inferred`), attributed flag, links to the start and stop events.
-- `apps`: client ID, name, path, signing Team ID, first seen, last seen.
-- `tcc_requests_agg`: one-minute bucket, client, service, result, count.
-- `coverage`: agent heartbeats and backfill checkpoints.
+The database is `~/Library/Application Support/io.github.drawmeanelephant.wyla/wyla.sqlite`, in WAL mode so that the app can read while the agent writes. The folder is mode 0700 and the database files 0600. Times are integer microseconds since 1970 (`*_us` columns), the precision of `log` timestamps. The schema is created by the migrations in `Packages/WylaCore/Sources/WylaCore/Storage/Schema.swift`.
+
+- `raw_events`: `id`, `time_us`, `source`, `message`, `dedup_key`, `prev_hash`, `hash`. Rows can only be added. Sources:
+  - `indicator`: a Control Center line as logged, including lines the parser could not read, for the Health view.
+  - `hardware`: a camera or microphone device turning on or off, as `<sensor> <device> on|off`.
+  - `tcc`: the TCC request that linked a command-line client to its responsible app, as JSON. Other TCC requests are not stored here (see `tcc_requests_agg`).
+- `activations`: one row per activation (the timeline merges them into sessions when it reads them). Columns: `sensor`, `client` (bundle ID, executable name, or NULL when unattributed), `start_us`, `end_us` (NULL while open), `end_reason` (`stopped`, `agent_restart`), `display_name`, `device`, `device_use` (JSON seconds per device), the responsible app's identifier, pid, and path, and links to the raw events that started and ended the activation and that named its responsible app. `(sensor, client, start_us)` is unique.
+- `apps`: client ID, name, path, signing Team ID (filled from M4), first seen, last seen.
+- `tcc_requests_agg`: one-minute bucket, client, service, result, count (filled from M6).
+- `coverage`: one row per agent run, with its start and its last heartbeat. A gap between one run's last heartbeat and the next run's start is time when WYLA was not monitoring.
+- `checkpoints`: per log source, the latest log timestamp the agent processed. Backfill resumes from it.
+
+`Recorder` writes each input in one transaction: the raw event, then the activation changes that `SessionBuilder` derives from it. An input whose `dedup_key` is already stored is skipped before it reaches the builder, so a backfill that overlaps recorded events changes nothing. After a restart, `Recorder` resumes the activations whose `end_us` is NULL.
 
 ## Audit guarantees
 
-- Every session links to the raw log lines that created it.
-- Database triggers reject UPDATE and DELETE on `raw_events`.
-- Each `raw_events` row's SHA-256 hash covers the previous row's hash. "Verify integrity" recomputes the chain and reports the first bad row.
+- Every activation links to the raw events that started and ended it.
+- Database triggers reject UPDATE and DELETE on `raw_events`, and any INSERT that doesn't extend the chain (its `id` must be the next id and its `prev_hash` the last row's hash).
+- Each `raw_events` row's SHA-256 hash covers the previous row's hash. Hashes are lowercase hex SHA-256 of UTF-8 text:
+  - `dedup_key = sha256("<source>\n<time_us>\n<message>")`
+  - `hash = sha256("<id>\n<time_us>\n<source>\n<dedup_key>\n<prev_hash>\n<message>")`, with 64 zeros as the first row's `prev_hash`
+- "Verify integrity" (`EventStore.verifyIntegrity`) recomputes the chain and reports the first bad row: missing ids (a deleted row), a `prev_hash` that doesn't match (an inserted or replaced row), or a hash that doesn't match (an edited row).
 - The agent writes a heartbeat every 30 s. After a restart it backfills from its last checkpoint with `log show --start`, which covers gaps of up to about a day. Longer gaps appear in the UI as "not monitoring from X to Y".
-- Limit: this detects edits and gaps. It can't stop an admin from rewriting the whole database. An optional daily export of the latest chain hash makes such a rewrite detectable.
+- Limit: this detects edits and gaps. It can't stop an admin from rewriting the whole chain, or from removing rows at the end. Saving the chain head (`EventStore.head()`, an id and hash) outside the database, for example in a daily export, makes such a rewrite detectable: `verifyIntegrity(anchor:)` reports when the chain no longer contains that row unchanged.
 
 ## UI
 

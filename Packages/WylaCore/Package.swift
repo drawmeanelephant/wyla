@@ -7,8 +7,15 @@ let package = Package(
     products: [
         .library(name: "WylaCore", targets: ["WylaCore"])
     ],
+    dependencies: [
+        // SQLite wrapper for the event store. Pinned exactly; Dependabot proposes updates.
+        .package(url: "https://github.com/groue/GRDB.swift.git", exact: "7.12.0")
+    ],
     targets: [
-        .target(name: "WylaCore"),
-        .testTarget(name: "WylaCoreTests", dependencies: ["WylaCore"], resources: [.copy("Fixtures")])
+        .target(name: "WylaCore", dependencies: [.product(name: "GRDB", package: "GRDB.swift")]),
+        .testTarget(
+            name: "WylaCoreTests",
+            dependencies: ["WylaCore", .product(name: "GRDB", package: "GRDB.swift")],
+            resources: [.copy("Fixtures")])
     ]
 )
