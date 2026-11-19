@@ -79,7 +79,7 @@ struct TimelineView: View {
                         }
                     }
                     TableColumn("Duration") { session in
-                        Text(Format.duration(session.duration(asOf: .now)))
+                        Text(Format.duration(session.duration(asOf: store.liveAsOf)))
                             .foregroundStyle(session.end == nil ? .primary : .secondary)
                     }
                     .width(70)

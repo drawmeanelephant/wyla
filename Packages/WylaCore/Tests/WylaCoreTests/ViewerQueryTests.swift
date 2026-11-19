@@ -126,3 +126,13 @@ private struct Recorded {
                 $0[$1.sensor, default: 0] += 1
             }.map { "\($0.key.rawValue) \($0.value)" }.sorted())
 }
+
+@Test func lastHeartbeatIsTheLatestSavedBeat() throws {
+    let temporary = try TemporaryStore()
+    let start = Date(timeIntervalSince1970: 1_800_000_000)
+    #expect(try temporary.store.lastHeartbeat() == nil)
+
+    let recorder = try Recorder(store: temporary.store, startingAt: start)
+    try recorder.heartbeat(at: start.addingTimeInterval(30))
+    #expect(try temporary.store.lastHeartbeat() == start.addingTimeInterval(30))
+}

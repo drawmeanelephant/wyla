@@ -28,8 +28,14 @@ final class Store {
     private(set) var loadError: String?
 
     private var store: EventStore?
+    /// The agent's last heartbeat; a stale one means it died leaving activations open.
+    private(set) var lastHeartbeat: Date?
     /// The object the Darwin notification callback is registered for.
     private let relay = NotificationRelay()
+
+    /// While an activation is open the agent heartbeats every 5 s, so an open activation with a
+    /// heartbeat older than this belongs to a dead agent.
+    static let livenessWindow: TimeInterval = 15
 
     /// Tests set `WYLA_DATABASE` to view a database other than the agent's.
     static func databaseURL() -> URL {
@@ -45,6 +51,7 @@ final class Store {
         } catch {
             store = nil
             loadError = error.localizedDescription
+            lastHeartbeat = nil
         }
         reload()
         relay.onChange = { [weak self] in
@@ -68,20 +75,43 @@ final class Store {
     }
 
     func reload() {
+        // Retry opening: on first launch the agent can still be creating the database.
+        if store == nil {
+            do {
+                store = try EventStore(url: Self.databaseURL())
+            } catch {
+                loadError = error.localizedDescription
+            }
+        }
         guard let store else { return }
         do {
             activations = try store.activations()
             sessions = SessionMerger.merge(activations)
             apps = Dictionary(try store.apps().map { ($0.client, $0) }, uniquingKeysWith: { first, _ in first })
+            lastHeartbeat = try store.lastHeartbeat()
             loadError = nil
         } catch {
             loadError = error.localizedDescription
         }
     }
 
-    /// The activations still running, latest first.
+    /// Whether the agent reported itself alive recently.
+    var monitoringLive: Bool {
+        guard let lastHeartbeat else { return false }
+        return Date.now.timeIntervalSince(lastHeartbeat) < Self.livenessWindow
+    }
+
+    /// What "now" means to the viewer: the present while the agent runs, its last heartbeat once
+    /// it is dead, so a session it left open stops growing.
+    var liveAsOf: Date {
+        monitoringLive ? .now : lastHeartbeat ?? .now
+    }
+
+    /// The activations still running, latest first. Empty when the agent is dead: the open
+    /// activations it left behind ended no later than its last heartbeat.
     var activeNow: [Activation] {
-        activations.filter { $0.end == nil }.sorted { $0.start > $1.start }
+        guard monitoringLive else { return [] }
+        return activations.filter { $0.end == nil }.sorted { $0.start > $1.start }
     }
 
     /// Sessions that started today, per sensor.

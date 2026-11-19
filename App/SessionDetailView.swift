@@ -67,8 +67,8 @@ struct SessionDetailView: View {
     }
 
     private var summaryLine: String {
-        let end = session.end.map(Format.timestamp) ?? "now"
-        let duration = Format.duration(session.duration(asOf: .now))
+        let end = session.end.map(Format.timestamp) ?? (store.monitoringLive ? "now" : Format.timestamp(store.liveAsOf))
+        let duration = Format.duration(session.duration(asOf: store.liveAsOf))
         return "\(session.sensor.displayName) · \(Format.timestamp(session.start)) – \(end) · \(duration)"
     }
 }

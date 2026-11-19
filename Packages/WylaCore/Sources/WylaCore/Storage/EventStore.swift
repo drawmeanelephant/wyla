@@ -100,6 +100,14 @@ public final class EventStore: Sendable {
         }
     }
 
+    /// The last heartbeat the agent saved, or nil if it never ran. An old heartbeat means the
+    /// agent is dead, so the viewer doesn't treat the open activations it left behind as live.
+    public func lastHeartbeat() throws -> Date? {
+        try pool.read { db in
+            try Int64.fetchOne(db, sql: "SELECT max(last_heartbeat_us) FROM coverage").map(Date.init(microseconds:))
+        }
+    }
+
     /// The last row of the hash chain. Save it outside the database to detect later truncation or
     /// rewriting with `verifyIntegrity(anchor:)`.
     public func head() throws -> ChainAnchor? {
