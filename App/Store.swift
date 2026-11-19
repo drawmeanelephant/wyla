@@ -187,6 +187,15 @@ final class Store {
         return try store.rawEvents(withIDs: session.eventIDs)
     }
 
+    /// Per-day check totals for one client's service, for the Requests history chart; reads off
+    /// the main actor.
+    func requestDaily(client: String, service: String) async throws -> [EventStore.TCCDailyCount] {
+        guard let store else { return [] }
+        return try await Task.detached {
+            try store.tccRequestDaily(client: client, service: service)
+        }.value
+    }
+
     /// The name to show for a client: its `apps` name, the name the system log saw, or its
     /// bundle identifier or executable name.
     func name(of session: Session) -> String {

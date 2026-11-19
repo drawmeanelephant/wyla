@@ -1,12 +1,16 @@
+import Charts
 import SwiftUI
 import WylaCore
 
-/// The TCC permission-check totals, filterable by service and searchable by app.
+/// The TCC permission-check totals, filterable by service and searchable by app, with a
+/// per-day history for the selected row.
 struct RequestsView: View {
     let store: Store
 
     @State private var service: String?
     @State private var search = ""
+    @State private var selection: TCCSummary.ID?
+    @State private var history: [EventStore.TCCDailyCount] = []
 
     private var filtered: [TCCSummary] {
         store.requests.filter { request in
@@ -14,6 +18,9 @@ struct RequestsView: View {
                 && (search.isEmpty || store.name(of: request).localizedCaseInsensitiveContains(search)
                     || request.service.localizedCaseInsensitiveContains(search))
         }
+        // Rows come back ordered by total; the table reads by app name, so sort by what the
+        // first column shows.
+        .sorted { store.name(of: $0).localizedCaseInsensitiveCompare(store.name(of: $1)) == .orderedAscending }
     }
 
     var body: some View {
@@ -41,7 +48,7 @@ struct RequestsView: View {
                 }
                 .frame(maxHeight: .infinity)
             } else {
-                Table(filtered) {
+                Table(filtered, selection: $selection) {
                     TableColumn("App") { request in
                         Label {
                             Text(store.name(of: request))
@@ -86,7 +93,40 @@ struct RequestsView: View {
                     }
                     .width(140)
                 }
+                if let selected = filtered.first(where: { $0.id == selection }) {
+                    Divider()
+                    historyChart(of: selected)
+                        .task(id: selected.id) {
+                            history =
+                                (try? await store.requestDaily(client: selected.client, service: selected.service))
+                                ?? []
+                        }
+                }
             }
+        }
+        .padding()
+    }
+
+    /// Checks per day for the selected app and service, stacked by result.
+    private func historyChart(of request: TCCSummary) -> some View {
+        VStack(alignment: .leading) {
+            Text("\(store.name(of: request)) — \(Self.serviceName(request.service)) checks per day")
+                .font(.headline)
+            Chart(history, id: \.self) { day in
+                BarMark(
+                    x: .value("Day", day.day, unit: .day),
+                    y: .value("Checks", day.count)
+                )
+                .foregroundStyle(by: .value("Result", day.result))
+            }
+            .chartXAxis {
+                AxisMarks(values: .stride(by: .day)) { _ in
+                    AxisGridLine()
+                    AxisValueLabel(format: .dateTime.month().day())
+                }
+            }
+            .chartYAxisLabel("Checks")
+            .frame(minHeight: 140, maxHeight: 200)
         }
     }
 
