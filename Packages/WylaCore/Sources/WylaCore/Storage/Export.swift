@@ -89,6 +89,14 @@ public struct ExportManifest: Sendable, Equatable, Codable {
     }
 }
 
+/// ISO 8601 with fractional seconds for the sessions files — whole-second output would show
+/// a sub-second session as zero-length.
+private func iso8601Fractional(_ date: Date) -> String {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter.string(from: date)
+}
+
 enum CSV {
     /// CSV quoting: quote when the value can break a row, double the quotes inside it.
     static func escape(_ value: String) -> String {
@@ -152,10 +160,17 @@ public enum AuditExport {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
+        // Session timestamps need sub-second precision or short sessions read as zero-length.
+        let sessionsEncoder = JSONEncoder()
+        sessionsEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        sessionsEncoder.dateEncodingStrategy = .custom { date, encoder in
+            var container = encoder.singleValueContainer()
+            try container.encode(iso8601Fractional(date))
+        }
         let sessionsEncoded = sessions.map { ExportedSession(session: $0, hashes: hashes) }
         try writeFile(encoder.encode(manifest), to: directory.appending(path: "manifest.json"))
         try writeFile(encoder.encode(rows), to: directory.appending(path: "raw_events.json"))
-        try writeFile(encoder.encode(sessionsEncoded), to: directory.appending(path: "sessions.json"))
+        try writeFile(sessionsEncoder.encode(sessionsEncoded), to: directory.appending(path: "sessions.json"))
 
         let rawCSV = ([ExportedRow.csvHeader] + rows.map(\.csvRow)).joined(separator: "\n") + "\n"
         try writeFile(Data(rawCSV.utf8), to: directory.appending(path: "raw_events.csv"))
@@ -211,7 +226,7 @@ public enum AuditExport {
             problem = .countMismatch(found: rows.count, manifest: manifest.rowCount, atRow: atRow)
         }
         let walk = problem == nil ? verifyChain(rows, skipped: skippedByID, anchors: anchorsByID) : ChainWalk()
-        problem = walk.problem
+        problem = problem ?? walk.problem
         // The newest covered anchor whose row is missing reports as truncation; a skipped row
         // is still present — the manifest carries its hash. The check runs even on an empty
         // export — clearing every row and the manifest must not pass — and is not bounded by
@@ -227,11 +242,12 @@ public enum AuditExport {
         return ExportReport(verifiedRows: walk.verifiedRows, head: walk.head, problem: problem, headMismatch: headMismatch)
     }
 
-    /// The anchors an export must contain: a day strictly inside the manifest's range always
-    /// qualifies; on a boundary day only when the manifest covers the whole day — a partial-day
-    /// export legitimately misses an anchor written later that day. An anchor is only required
-    /// from the first exported row on: a quiet day carries the previous head forward, so a
-    /// covered day can legitimately anchor a row the export starts after.
+    /// The anchors an export must contain. An anchor is written at its day's end, so a day is
+    /// covered when the manifest's range reaches that end — days before the last always
+    /// qualify, the last day only when the manifest covers it whole, or a partial-day export
+    /// would flag an anchor written later that day. An anchor is only required from the first
+    /// exported row on: a quiet day carries the previous head forward, so a covered day can
+    /// legitimately anchor a row the export starts after.
     private static func coveredAnchors(
         _ anchors: [(day: String, anchor: ChainAnchor)], manifest: ExportManifest, firstID: Int64
     ) -> [ChainAnchor] {
@@ -240,14 +256,11 @@ public enum AuditExport {
         dayFormatter.timeZone = TimeZone(identifier: "UTC")
         let firstDay = dayFormatter.string(from: manifest.from)
         let lastDay = dayFormatter.string(from: manifest.end)
-        let firstDayStart = dayFormatter.date(from: firstDay) ?? .distantPast
         let lastDayEnd = dayFormatter.date(from: lastDay).map { $0 + 86399 } ?? .distantFuture
         return anchors.filter { entry in
             guard entry.anchor.id >= firstID else { return false }
-            if entry.day > firstDay && entry.day < lastDay { return true }
-            if entry.day == firstDay && manifest.from <= firstDayStart { return true }
-            if entry.day == lastDay && manifest.end >= lastDayEnd { return true }
-            return false
+            guard entry.day >= firstDay && entry.day <= lastDay else { return false }
+            return entry.day < lastDay || manifest.end >= lastDayEnd
         }.map(\.anchor)
     }
 
@@ -354,8 +367,8 @@ struct ExportedSession: Codable {
     static let csvHeader = "sensor,client,display_name,responsible,start,end,activation_count,event_refs"
     var csvRow: String {
         CSV.line([
-            sensor, client, displayName, responsible, ISO8601DateFormatter().string(from: start),
-            end.map { ISO8601DateFormatter().string(from: $0) }, String(activationCount),
+            sensor, client, displayName, responsible, iso8601Fractional(start),
+            end.map { iso8601Fractional($0) }, String(activationCount),
             eventRefs.map { "\($0.id):\($0.hash ?? "")" }.joined(separator: ";")
         ])
     }

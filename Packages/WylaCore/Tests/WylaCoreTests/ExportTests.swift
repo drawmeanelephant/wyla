@@ -191,6 +191,49 @@ private func relink(_ rows: inout [ExportedRow]) {
     #expect(try AuditExport.verify(directory: temporary.directory.appending(path: "export")).isIntact)
 }
 
+@Test func rowsAddedToAnEmptiedManifestAreFlagged() throws {
+    let (temporary, directory) = try recorded()
+    try AuditExport.write(store: temporary.store, from: .distantPast, to: .distantFuture, to: directory)
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    var rows = try decoder.decode(
+        [ExportedRow].self, from: Data(contentsOf: directory.appending(path: "raw_events.json")))
+    let manifest = try decoder.decode(
+        ExportManifest.self, from: Data(contentsOf: directory.appending(path: "manifest.json")))
+    rows = Array(rows.prefix(1))
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    encoder.dateEncodingStrategy = .iso8601
+    try encoder.encode(rows).write(to: directory.appending(path: "raw_events.json"))
+    // The forged manifest claims the export is empty; the count mismatch must survive the walk.
+    let emptied = ExportManifest(
+        exportedAt: manifest.exportedAt, from: manifest.from, end: manifest.end,
+        head: nil, rowCount: 0, sessionCount: 0)
+    try encoder.encode(emptied).write(to: directory.appending(path: "manifest.json"))
+
+    let report = try AuditExport.verify(directory: directory)
+    #expect(report.problem == .countMismatch(found: 1, manifest: 0, atRow: rows[0].id))
+    #expect(!report.isIntact)
+}
+
+@Test func aSameDayExportDoesNotFlagItsOwnAnchor() throws {
+    let (temporary, directory) = try recorded()
+    let rows = try temporary.rows("SELECT min(time_us) AS lo FROM raw_events")
+    let start = Date(timeIntervalSince1970: Double(try #require(rows[0]["lo"] as Int64?)) / 1_000_000)
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyy-MM-dd"
+    formatter.timeZone = TimeZone(identifier: "UTC")
+    let from = try #require(formatter.date(from: formatter.string(from: start)))
+    // The export starts at UTC midnight of its day but ends before the day does, so the day's
+    // own anchor — written at day end — is legitimately missing.
+    try AuditExport.write(
+        store: temporary.store, from: from, to: from.addingTimeInterval(43_200), to: directory)
+    let head = try #require(try temporary.store.head())
+    let anchors = [(formatter.string(from: from), head)]
+
+    #expect(try AuditExport.verify(directory: directory, anchors: anchors).isIntact)
+}
+
 @Test func anAnchorPointingBeforeTheExportDoesNotFlagIt() throws {
     let (temporary, directory) = try recorded()
     let rows = try temporary.rows("SELECT min(time_us) AS lo, max(time_us) AS hi FROM raw_events")
