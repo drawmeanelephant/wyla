@@ -112,9 +112,12 @@ public final class Recorder {
                 return try apply(raw, nil, at: time) { db in try Self.countUnparsed(.indicator, in: db) }
             case .event(let indicator): return try apply(raw, .indicator(indicator, time: time), at: time)
             }
-        case .unparsedTCC:
+        case .unparsedTCC(let event):
             checkpoints[.tcc] = max(checkpoints[.tcc] ?? time, time)
-            return try apply(nil, nil, at: time) { db in try Self.countUnparsed(.tcc, in: db) }
+            // Kept as a raw event so a replayed line dedups: `apply` skips the side effect
+            // unless the append is new, which keeps `unparsed_lines` honest across backfill.
+            let raw = RawInput(source: .tcc, time: time, identity: event.entryID, message: event.message)
+            return try apply(raw, nil, at: time) { db in try Self.countUnparsed(.tcc, in: db) }
         case .tccRequest(let request):
             checkpoints[.tcc] = max(checkpoints[.tcc] ?? time, time)
             // Requests are counted, not chained: `tcc_requests` dedups them by (messageID,
@@ -249,6 +252,57 @@ public final class Recorder {
     /// the documented drift is about 1 ms.
     private static let streamDriftMicros: Int64 = 10_000
 
+    /// Stores the TCC request that `SessionBuilder` took the activation's responsible app from.
+    /// Only these requests join the hash chain: the rest live in `tcc_requests`/`tcc_requests_agg`
+    /// as dedup rows and totals. The dedup row recorded at count time gets its `raw_event_id` here.
+    private func storeResponsibleRequest(of activation: Activation, in db: Database) throws -> Int64? {
+        guard let responsible = activation.responsible,
+            let request = recentRequests.last(where: {
+                $0.sensor == activation.sensor && $0.responsibleApp == responsible && $0.time <= activation.start
+                    && activation.start.timeIntervalSince($0.time) <= SessionBuilder.responsibleMatchWindow
+            })
+        else { return nil }
+        let storedID = try Int64.fetchOne(
+            db,
+            sql: "SELECT raw_event_id FROM tcc_requests WHERE message_id = ? AND dedup_id = ?",
+            arguments: [request.messageID, request.dedupID])
+        if let storedID { return storedID }
+        let appended = try EventStore.append(
+            .tcc, time: request.time, identity: nil, message: try canonicalJSON(request), in: db)
+        try db.execute(
+            sql: """
+                UPDATE tcc_requests SET raw_event_id = ?
+                WHERE message_id = ? AND dedup_id = ? AND raw_event_id IS NULL
+                """,
+            arguments: [appended.id, request.messageID, request.dedupID])
+        return appended.id
+    }
+
+    private func write(_ updates: (Database) throws -> Void) throws {
+        try store.pool.write(updates)
+        writeCount += 1
+    }
+
+    private func prune(at time: Date) {
+        let eventCutoff = time.addingTimeInterval(-(SessionBuilder.unattributedGrace + 1)).microseconds
+        recentEvents = recentEvents.filter { $0.key >= eventCutoff }
+        recentRequests.removeAll { time.timeIntervalSince($0.time) > SessionBuilder.responsibleMatchWindow }
+    }
+}
+
+extension HardwareChange {
+    /// The `raw_events` message for a hardware change: `camera MacBook Pro Camera on`.
+    var message: String { "\(sensor.rawValue) \(device) \(isRunning ? "on" : "off")" }
+
+    init?(message: String, time: Date) {
+        let words = message.split(separator: " ", omittingEmptySubsequences: false)
+        guard words.count >= 3, let sensor = Sensor(rawValue: String(words[0])), ["on", "off"].contains(words.last) else { return nil }
+        self.init(time: time, sensor: sensor, device: words.dropFirst().dropLast().joined(separator: " "), isRunning: words.last == "on")
+    }
+}
+
+extension Recorder {
+
     /// Counts the request in its one-minute bucket in `tcc_requests_agg`, deduplicated on
     /// (message_id, dedup_id): the log's msgID is `pid.counter`, which a process restart or
     /// reboot reuses, and its wall time drifts ~1 ms between `log stream` and `log show`, so
@@ -306,57 +360,6 @@ public final class Recorder {
                 """,
             arguments: [minute, request.responsibleApp?.identifier ?? "", request.service, request.authValue])
     }
-
-    /// Stores the TCC request that `SessionBuilder` took the activation's responsible app from.
-    /// Only these requests join the hash chain: the rest live in `tcc_requests`/`tcc_requests_agg`
-    /// as dedup rows and totals. The dedup row recorded at count time gets its `raw_event_id` here.
-    private func storeResponsibleRequest(of activation: Activation, in db: Database) throws -> Int64? {
-        guard let responsible = activation.responsible,
-            let request = recentRequests.last(where: {
-                $0.sensor == activation.sensor && $0.responsibleApp == responsible && $0.time <= activation.start
-                    && activation.start.timeIntervalSince($0.time) <= SessionBuilder.responsibleMatchWindow
-            })
-        else { return nil }
-        let storedID = try Int64.fetchOne(
-            db,
-            sql: "SELECT raw_event_id FROM tcc_requests WHERE message_id = ? AND dedup_id = ?",
-            arguments: [request.messageID, request.dedupID])
-        if let storedID { return storedID }
-        let appended = try EventStore.append(
-            .tcc, time: request.time, identity: nil, message: try canonicalJSON(request), in: db)
-        try db.execute(
-            sql: """
-                UPDATE tcc_requests SET raw_event_id = ?
-                WHERE message_id = ? AND dedup_id = ? AND raw_event_id IS NULL
-                """,
-            arguments: [appended.id, request.messageID, request.dedupID])
-        return appended.id
-    }
-
-    private func write(_ updates: (Database) throws -> Void) throws {
-        try store.pool.write(updates)
-        writeCount += 1
-    }
-
-    private func prune(at time: Date) {
-        let eventCutoff = time.addingTimeInterval(-(SessionBuilder.unattributedGrace + 1)).microseconds
-        recentEvents = recentEvents.filter { $0.key >= eventCutoff }
-        recentRequests.removeAll { time.timeIntervalSince($0.time) > SessionBuilder.responsibleMatchWindow }
-    }
-}
-
-extension HardwareChange {
-    /// The `raw_events` message for a hardware change: `camera MacBook Pro Camera on`.
-    var message: String { "\(sensor.rawValue) \(device) \(isRunning ? "on" : "off")" }
-
-    init?(message: String, time: Date) {
-        let words = message.split(separator: " ", omittingEmptySubsequences: false)
-        guard words.count >= 3, let sensor = Sensor(rawValue: String(words[0])), ["on", "off"].contains(words.last) else { return nil }
-        self.init(time: time, sensor: sensor, device: words.dropFirst().dropLast().joined(separator: " "), isRunning: words.last == "on")
-    }
-}
-
-extension Recorder {
 
     /// Marks this run as ended by the agent itself, so a gap to the next run's start is a
     /// restart, not lost coverage. Called from `stop`; a crashed run's flag stays unset.

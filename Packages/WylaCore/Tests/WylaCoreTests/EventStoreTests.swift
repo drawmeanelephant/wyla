@@ -192,3 +192,14 @@ private func sha256(_ text: String) -> String {
     #expect(try temporary.store.head() == nil)
     #expect(try temporary.store.checkpoint(for: .indicator) == nil)
 }
+
+@Test func aReplayedUnparsedTCCLineCountsOnce() throws {
+    let temporary = try TemporaryStore()
+    let start = Date(timeIntervalSince1970: 1_800_000_000)
+    let event = LogEvent(timestamp: start, message: "AUTHREQ_CTX: garbled", entryID: "abc.1")
+    let recorder = try Recorder(store: temporary.store, startingAt: start)
+    try recorder.record(.unparsedTCC(event))
+    // Backfill after a restart replays the same line; it must not count twice.
+    try recorder.record(.unparsedTCC(event))
+    #expect(try temporary.store.unparsedCount() == 1)
+}
