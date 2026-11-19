@@ -40,6 +40,12 @@ sqlite3 -readonly ~/Library/Application\ Support/io.github.drawmeanelephant.wyla
 
 The last `coverage` row's `last_heartbeat_us` should be less than 30 s old while the agent runs. Don't open the database for writing: `raw_events` rejects changes, and editing other tables can break the links that the integrity check relies on.
 
+### Install and uninstall
+
+- `make install` builds Release, replaces `/Applications/Wyla.app` atomically — a staging copy moves in place, so no stale files merge into the new bundle — and verifies its signature before opening it. It needs an administrator account.
+- `make uninstall` stops the app and agent, runs the app's `--unregister-agent` to drop the SMAppService registration (macOS can keep the registration for a deleted bundle, which leaves a re-install stuck off), and removes the bundle. The recorded log is kept.
+- `make uninstall-data` also deletes the database, anchors.log, and settings. `scripts/uninstall.sh` is the script both call; it takes `--delete-data` (asks to confirm unless `--yes` is passed) and rejects unknown arguments.
+
 Check the hash chain with the agent's verifier. It prints `OK` with the row count and chain head, or `BROKEN` with the first bad row, and exits with status 1 when the chain is broken:
 
 ```sh

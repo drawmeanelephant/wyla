@@ -3,6 +3,7 @@ import SwiftUI
 struct MainWindow: View {
     static let id = "main"
     let store: Store
+    let registration: AgentRegistration
 
     var body: some View {
         if let error = store.loadError {
@@ -20,6 +21,10 @@ struct MainWindow: View {
                     .tabItem { Label("Apps", systemImage: "square.grid.2x2") }
                 RequestsView(store: store)
                     .tabItem { Label("Requests", systemImage: "lock.shield") }
+                HealthView(store: store)
+                    .tabItem { Label("Health", systemImage: "heart") }
+                SettingsView(store: store, registration: registration)
+                    .tabItem { Label("Settings", systemImage: "gearshape") }
             }
             .frame(minWidth: 760, minHeight: 480)
         }

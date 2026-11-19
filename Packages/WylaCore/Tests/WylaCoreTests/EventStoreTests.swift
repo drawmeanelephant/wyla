@@ -65,7 +65,7 @@ private func sha256(_ text: String) -> String {
         case .indicator(let event):
             if case .ignored = parser.parse(event.message) { false } else { true }
         case .hardware: true
-        case .tccRequest: false
+        case .tccRequest, .unparsedTCC: false
         }
     }.count
     #expect(chainedTCC == linked)
@@ -177,10 +177,10 @@ private func sha256(_ text: String) -> String {
     let unanchored = try temporary.store.verifyIntegrity()
     #expect(unanchored.isIntact)
     #expect(unanchored.head?.id == head.id - 3)
-    let anchored = try temporary.store.verifyIntegrity(anchor: head)
+    let anchored = try temporary.store.verifyIntegrity(anchors: [head])
     #expect(anchored.problem == .anchorMismatch(head))
     #expect(anchored.problem?.firstBadRow == head.id)
-    #expect(try temporary.store.verifyIntegrity(anchor: unanchored.head).isIntact)
+    #expect(try temporary.store.verifyIntegrity(anchors: unanchored.head.map { [$0] } ?? []).isIntact)
 }
 
 @Test func emptyStoreIsIntact() throws {
@@ -191,4 +191,15 @@ private func sha256(_ text: String) -> String {
     #expect(report.head == nil)
     #expect(try temporary.store.head() == nil)
     #expect(try temporary.store.checkpoint(for: .indicator) == nil)
+}
+
+@Test func aReplayedUnparsedTCCLineCountsOnce() throws {
+    let temporary = try TemporaryStore()
+    let start = Date(timeIntervalSince1970: 1_800_000_000)
+    let event = LogEvent(timestamp: start, message: "AUTHREQ_CTX: garbled", entryID: "abc.1")
+    let recorder = try Recorder(store: temporary.store, startingAt: start)
+    try recorder.record(.unparsedTCC(event))
+    // Backfill after a restart replays the same line; it must not count twice.
+    try recorder.record(.unparsedTCC(event))
+    #expect(try temporary.store.unparsedCount() == 1)
 }
