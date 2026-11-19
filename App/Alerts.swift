@@ -24,9 +24,9 @@ final class Alerts {
     }
 
     func report(on activations: [Activation], settings: Settings) {
-        guard settings.notificationsEnabled else { return }
         // The first read is history, not news: everything already recorded is remembered as
-        // seen, and only activations added later can be new to the user.
+        // seen, and only activations added later can be new to the user. `seen` updates even
+        // with notifications off, so a use from the off period doesn't alert on reenable.
         guard primed else {
             primed = true
             seen.formUnion(activations.map(\.id))
@@ -40,6 +40,7 @@ final class Alerts {
         }
         for activation in activations where !seen.contains(activation.id) {
             seen.insert(activation.id)
+            guard settings.notificationsEnabled else { continue }
             let firstUse =
                 activation.client != nil
                 && earliest["\(activation.sensor.rawValue)/\(activation.client ?? "")"] == activation.start
