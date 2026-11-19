@@ -76,7 +76,7 @@ struct HealthView: View {
 
     private func reload() {
         Task.detached(priority: .userInitiated) { [store] in
-            let health = try? store.health()
+            let health = try? await store.health()
             await MainActor.run { self.health = health }
         }
     }
@@ -86,7 +86,7 @@ struct HealthView: View {
         report = nil
         Task.detached(priority: .userInitiated) { [store] in
             do {
-                let report = try store.verifyIntegrity()
+                let report = try await store.verifyIntegrity()
                 await MainActor.run {
                     self.report = report
                     self.verifying = false
@@ -107,7 +107,7 @@ struct HealthView: View {
         guard panel.runModal() == .OK, let directory = panel.url else { return }
         Task.detached(priority: .userInitiated) { [store] in
             do {
-                let manifest = try store.export(
+                let manifest = try await store.export(
                     from: exportFrom, to: exportTo.addingTimeInterval(86_400).addingTimeInterval(-1), into: directory)
                 await MainActor.run {
                     self.exported = "\(manifest.rowCount) events, \(manifest.sessionCount) sessions → \(directory.lastPathComponent)"
