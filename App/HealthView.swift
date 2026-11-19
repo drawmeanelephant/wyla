@@ -117,7 +117,7 @@ struct HealthView: View {
                 // started from; take the date through the end of its own day.
                 let manifest = try await store.export(
                     from: exportFrom,
-                    to: Calendar.current.startOfDay(for: exportTo).addingTimeInterval(86_399), into: directory)
+                    to: exportTo.localDayEnd, into: directory)
                 await MainActor.run {
                     self.exported = "\(manifest.rowCount) events, \(manifest.sessionCount) sessions → \(directory.lastPathComponent)"
                 }

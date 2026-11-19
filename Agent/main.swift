@@ -69,7 +69,7 @@ func exportIfAsked(_ url: URL) {
         do {
             let directory = URL(filePath: arguments[flag + 3])
             // A bare day means "through the end of that day"; an instant is used as given.
-            let inclusiveEnd = end.isDay ? end.date.addingTimeInterval(86399) : end.date
+            let inclusiveEnd = end.isDay ? end.date.localDayEnd : end.date
             let settings = Settings.load(from: Settings.url(near: url))
             let manifest = try AuditExport.write(
                 store: EventStore(url: url), from: from.date, to: inclusiveEnd, to: directory,
