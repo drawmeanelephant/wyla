@@ -17,29 +17,33 @@ enum Schema {
         return migrator
     }
 
-    /// The messageID of every completed TCC request, linked to its raw event. A request reaches
-    /// the recorder twice when `log show` backfill and `log stream` overlap, so the recorder
-    /// counts a request only when its messageID is new. Existing request events backfill the
-    /// table: their stored JSON carries the messageID.
+    /// Every completed TCC request, deduplicated on (message_id, time_us): the log's msgID is
+    /// `pid.counter`, which a process restart or reboot reuses, so the request's time
+    /// disambiguates. `raw_event_id` is NULL until the request links an activation to its
+    /// responsible app — only linking requests join the hash chain; the rest exist here only as
+    /// dedup rows feeding `tcc_requests_agg`. Existing request events backfill the table: their
+    /// stored JSON carries the messageID and `time` (JSONEncoder's seconds since 2001).
     private static let version3 = """
         CREATE TABLE tcc_requests (
-            message_id TEXT PRIMARY KEY,
-            raw_event_id INTEGER NOT NULL REFERENCES raw_events(id)
+            message_id TEXT NOT NULL,
+            time_us INTEGER NOT NULL,
+            raw_event_id INTEGER REFERENCES raw_events(id),
+            PRIMARY KEY (message_id, time_us)
         ) WITHOUT ROWID;
-        INSERT INTO tcc_requests (message_id, raw_event_id)
-            SELECT json_extract(message, '$.messageID'), id FROM raw_events
+        INSERT OR IGNORE INTO tcc_requests (message_id, time_us, raw_event_id)
+            SELECT json_extract(message, '$.messageID'),
+                CAST((json_extract(message, '$.time') + 978307200) * 1000000 AS INTEGER),
+                id FROM raw_events
             WHERE source = 'tcc' AND json_extract(message, '$.messageID') IS NOT NULL;
         -- Databases that predate the Requests totals stored request events without counting
-        -- them; rebuild their totals too. `time` is JSONEncoder's seconds since 2001.
-        INSERT INTO tcc_requests_agg (minute_us, client, service, auth_value, count)
-            SELECT CAST((json_extract(message, '$.time') + 978307200) * 1000000 / 60000000 AS INTEGER) * 60000000,
-                ifnull(coalesce(json_extract(message, '$.responsible.identifier'),
-                    json_extract(message, '$.accessing.identifier'),
-                    json_extract(message, '$.requesting.identifier')), ''),
-                json_extract(message, '$.service'), json_extract(message, '$.authValue'), count(*)
-            FROM raw_events
-            WHERE source = 'tcc' AND json_extract(message, '$.messageID') IS NOT NULL
-                AND NOT EXISTS (SELECT 1 FROM tcc_requests_agg)
+        -- them; rebuild their totals too, through the deduplicated tcc_requests rows.
+        INSERT OR IGNORE INTO tcc_requests_agg (minute_us, client, service, auth_value, count)
+            SELECT CAST(r.time_us / 60000000 AS INTEGER) * 60000000,
+                ifnull(coalesce(json_extract(e.message, '$.responsible.identifier'),
+                    json_extract(e.message, '$.accessing.identifier'),
+                    json_extract(e.message, '$.requesting.identifier')), ''),
+                json_extract(e.message, '$.service'), json_extract(e.message, '$.authValue'), count(*)
+            FROM tcc_requests r JOIN raw_events e ON e.id = r.raw_event_id
             GROUP BY 1, 2, 3, 4;
         """
 

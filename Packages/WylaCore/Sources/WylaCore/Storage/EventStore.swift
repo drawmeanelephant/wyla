@@ -120,6 +120,47 @@ public final class EventStore: Sendable {
         }
     }
 
+    /// One day's checks of one kind for the Requests history chart.
+    public struct TCCDailyCount: Sendable, Equatable, Hashable {
+        /// Start of the local day the checks were counted in.
+        public let day: Date
+        /// "denied", "unknown", "allowed", or "limited".
+        public let result: String
+        public let count: Int
+
+        public init(day: Date, result: String, count: Int) {
+            self.day = day
+            self.result = result
+            self.count = count
+        }
+    }
+
+    /// Per-day totals of one client and service's permission checks, summed from the one-minute
+    /// buckets into local days, oldest first.
+    public func tccRequestDaily(client: String, service: String) throws -> [TCCDailyCount] {
+        let rows = try pool.read { db in
+            try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT minute_us, auth_value, sum(count) AS count FROM tcc_requests_agg
+                    WHERE client = ? AND service = ? GROUP BY minute_us, auth_value
+                    """
+                , arguments: [client, service])
+        }
+        let names = [0: "denied", 1: "unknown", 2: "allowed", 3: "limited"]
+        var days: [Date: [String: Int]] = [:]
+        for row in rows {
+            let minute: Int64 = row["minute_us"]
+            let day = Calendar.current.startOfDay(for: Date(microseconds: minute))
+            let result = names[row["auth_value"] as Int] ?? "unknown"
+            days[day, default: [:]][result, default: 0] += row["count"] as Int
+        }
+        return days.keys.sorted().flatMap { day in
+            (days[day] ?? [:]).sorted { $0.key < $1.key }
+                .map { TCCDailyCount(day: day, result: $0.key, count: $0.value) }
+        }
+    }
+
     /// The last heartbeat the agent saved, or nil if it never ran. An old heartbeat means the
     /// agent is dead, so the viewer doesn't treat the open activations it left behind as live.
     public func lastHeartbeat() throws -> Date? {

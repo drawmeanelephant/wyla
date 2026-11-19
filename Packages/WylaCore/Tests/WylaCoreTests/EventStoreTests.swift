@@ -52,7 +52,24 @@ private func sha256(_ text: String) -> String {
     }
     var previous = String(repeating: "0", count: 64)
     let rows = try temporary.rows("SELECT * FROM raw_events ORDER BY id")
-    #expect(rows.count == 134)
+    // Indicators and hardware changes are chained; of the TCC requests only the ones that
+    // linked an activation to its responsible app are — the rest are counted, not stored.
+    let linked =
+        try temporary.rows(
+            "SELECT count(DISTINCT responsible_event_id) AS n FROM activations WHERE responsible_event_id IS NOT NULL"
+        )[0]["n"] as Int
+    let chainedTCC = try temporary.rows("SELECT count(*) AS n FROM raw_events WHERE source = 'tcc'")[0]["n"] as Int
+    let parser = IndicatorParser()
+    let nonTCC = try CaptureFixture("27.3-26C5035r").recorderInputs.filter {
+        switch $0 {
+        case .indicator(let event):
+            if case .ignored = parser.parse(event.message) { false } else { true }
+        case .hardware: true
+        case .tccRequest: false
+        }
+    }.count
+    #expect(chainedTCC == linked)
+    #expect(rows.count == nonTCC + linked)
     for (index, row) in rows.enumerated() {
         let id: Int64 = row["id"]
         let time: Int64 = row["time_us"]

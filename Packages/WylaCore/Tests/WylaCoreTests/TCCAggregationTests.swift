@@ -1,7 +1,8 @@
 import Foundation
 import GRDB
 import Testing
-import WylaCore
+
+@testable import WylaCore
 
 private let main = "27.3-26C5035r"
 
@@ -60,6 +61,34 @@ private func request(
     #expect(try temporary.rows("SELECT count FROM tcc_requests_agg").map { $0["count"] as Int } == [1])
 }
 
+@Test func aMessageIDReusedAfterARestartCountsEachRequest() throws {
+    let temporary = try TemporaryStore()
+    let start = Date(timeIntervalSince1970: 1_800_000_000)
+    let recorder = try Recorder(store: temporary.store, startingAt: start)
+    // The log's msgID is `pid.counter`: a process that restarts, or a reboot, reuses it. The
+    // request's time disambiguates, so the reused ID at a different time is a real request —
+    // while the same ID at the same time is the duplicate it was deduplicated for.
+    try recorder.record(.tccRequest(request(messageID: "1.2", at: start)))
+    try recorder.record(.tccRequest(request(messageID: "1.2", at: start.addingTimeInterval(120))))
+    try recorder.record(.tccRequest(request(messageID: "1.2", at: start.addingTimeInterval(130))))
+    try recorder.record(.tccRequest(request(messageID: "1.2", at: start.addingTimeInterval(130))))
+    #expect(
+        try temporary.rows("SELECT count FROM tcc_requests_agg ORDER BY count")
+            .map { $0["count"] as Int } == [1, 2])
+}
+
+@Test func requestsWithoutARawEventAreNotInTheChain() throws {
+    let temporary = try TemporaryStore()
+    let start = Date(timeIntervalSince1970: 1_800_000_000)
+    let recorder = try Recorder(store: temporary.store, startingAt: start)
+    try recorder.record(.tccRequest(request(at: start)))
+    try recorder.record(.tccRequest(request(at: start.addingTimeInterval(30))))
+    // Counted, but not chained: no activation linked to them.
+    #expect(try temporary.rows("SELECT * FROM raw_events WHERE source = 'tcc'").isEmpty)
+    #expect(try temporary.rows("SELECT * FROM tcc_requests").count == 2)
+    #expect(try temporary.rows("SELECT * FROM tcc_requests WHERE raw_event_id IS NOT NULL").isEmpty)
+}
+
 @Test func aRequestCompletedLateIsStillCounted() throws {
     let temporary = try TemporaryStore()
     let start = Date(timeIntervalSince1970: 1_800_000_000)
@@ -92,6 +121,71 @@ private func request(
     #expect(camera.lastSeen == start.addingTimeInterval(60))
     #expect(camera.sensor == .camera)
     #expect(totals.first { $0.service == "kTCCServiceScreenCapture" }?.total == 1)
+}
+
+@Test func v3BackfillIgnoresDuplicateRequestRows() throws {
+    // A database at v2 holding tcc raw events: a real second request after the pid.counter
+    // restarted (same msgID, different time), and a duplicate of it (same msgID and time, a
+    // different pid in the stored JSON).
+    let directory = FileManager.default.temporaryDirectory
+        .appending(path: "wyla-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let url = directory.appending(path: "wyla.sqlite")
+    let queue = try DatabaseQueue(path: url.path(percentEncoded: false))
+    try Schema.migrator.migrate(queue, upTo: "v2")
+
+    let start = Date(timeIntervalSince1970: 1_800_000_000)
+    func json(messageID: String, at time: Date, pid: Int = 1) throws -> String {
+        try canonicalJSON(
+            TCCRequest(
+                messageID: messageID, time: time, service: "kTCCServiceCamera",
+                responsible: TCCProcess(identifier: "com.example.app", pid: pid, binaryPath: nil),
+                accessing: nil, requesting: nil, authValue: 2))
+    }
+    try queue.write { db in
+        _ = try EventStore.append(
+            .tcc, time: start, identity: nil, message: json(messageID: "1.2", at: start), in: db)
+        _ = try EventStore.append(
+            .tcc, time: start.addingTimeInterval(60), identity: nil,
+            message: json(messageID: "1.2", at: start.addingTimeInterval(60)), in: db)
+        _ = try EventStore.append(
+            .tcc, time: start.addingTimeInterval(60), identity: nil,
+            message: json(messageID: "1.2", at: start.addingTimeInterval(60), pid: 2), in: db)
+    }
+
+    try Schema.migrator.migrate(queue)
+    // Three source rows, two distinct requests: the same-time duplicate is ignored.
+    let requests = try queue.read { db in
+        try Row.fetchAll(db, sql: "SELECT * FROM tcc_requests")
+    }
+    let counts = try queue.read { db in
+        try Row.fetchAll(db, sql: "SELECT count FROM tcc_requests_agg ORDER BY count")
+    }
+    #expect(requests.count == 2)
+    #expect(counts.map { $0["count"] as Int } == [1, 1])
+}
+
+@Test func dailyTotalsBucketMinutesByLocalDay() throws {
+    let temporary = try TemporaryStore()
+    let noon = Calendar.current.startOfDay(for: .now).addingTimeInterval(12 * 3600)
+    let recorder = try Recorder(store: temporary.store, startingAt: noon)
+    try recorder.record(.tccRequest(request(at: noon)))
+    try recorder.record(.tccRequest(request(authValue: 0, at: noon)))
+    try recorder.record(.tccRequest(request(at: noon.addingTimeInterval(-24 * 3600))))
+    try recorder.record(.tccRequest(request("com.example.other", at: noon)))
+
+    let daily = try temporary.store.tccRequestDaily(client: "com.example.app", service: "kTCCServiceCamera")
+    let yesterday = Calendar.current.startOfDay(for: noon.addingTimeInterval(-24 * 3600))
+    let today = Calendar.current.startOfDay(for: noon)
+    #expect(
+        daily.map { "\(Int($0.day.timeIntervalSince1970))|\($0.result)=\($0.count)" } == [
+            "\(Int(yesterday.timeIntervalSince1970))|allowed=1",
+            "\(Int(today.timeIntervalSince1970))|allowed=1",
+            "\(Int(today.timeIntervalSince1970))|denied=1"
+        ])
+    // The other client's checks don't leak in.
+    #expect(try temporary.store.tccRequestDaily(client: "com.example.other", service: "kTCCServiceCamera").count == 1)
 }
 
 @Test func captureRequestTotalsMatchTheCompletedRequests() throws {

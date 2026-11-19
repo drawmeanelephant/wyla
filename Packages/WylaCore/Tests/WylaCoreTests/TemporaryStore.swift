@@ -43,7 +43,7 @@ final class TemporaryStore {
     /// Every table the recorder writes, except `coverage`, which gains a row per agent run.
     func contents() throws -> [String: [Row]] {
         var contents: [String: [Row]] = [:]
-        for table in ["raw_events", "activations", "apps", "checkpoints", "tcc_requests_agg"] {
+        for table in ["raw_events", "activations", "apps", "checkpoints", "tcc_requests", "tcc_requests_agg"] {
             contents[table] = try rows("SELECT * FROM \(table) ORDER BY 1")
         }
         return contents
