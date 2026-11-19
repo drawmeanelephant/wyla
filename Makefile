@@ -84,9 +84,14 @@ release-zip: generate ## Build Release and zip Wyla.app into build/release (VERS
 	@echo "build/release/WYLA-$(VERSION).zip"
 
 install: generate ## Build Release, copy WYLA into /Applications, and open it
+	@mkdir -p build
 	xcodebuild -project $(PROJECT) -scheme $(SCHEME) -configuration Release -destination 'generic/platform=macOS' \
 		-derivedDataPath build/ReleaseDerivedData $(XCODEBUILD_FLAGS) build > build/xcodebuild-release.log \
 		|| { tail -n 60 build/xcodebuild-release.log; exit 1; }
+	osascript -e 'tell application "Wyla" to quit' 2>/dev/null || true
+	launchctl bootout "gui/$$(id -u)/io.github.drawmeanelephant.wyla.agent" 2>/dev/null || true
+	pkill -x WylaAgent 2>/dev/null || true
+	sleep 1
 	ditto --norsrc build/ReleaseDerivedData/Build/Products/Release/Wyla.app /Applications/Wyla.app
 	open /Applications/Wyla.app
 

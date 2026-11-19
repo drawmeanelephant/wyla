@@ -15,6 +15,8 @@ rm -rf /Applications/Wyla.app
 
 if [ "${1:-}" = "--delete-data" ]; then
     rm -rf "$HOME/Library/Application Support/io.github.drawmeanelephant.wyla"
+    # Saved preferences decide first-run behavior, so they go with the data.
+    defaults delete io.github.drawmeanelephant.wyla 2>/dev/null || true
     echo "WYLA removed, including the recorded log."
 else
     echo "WYLA removed; the recorded log was kept. Re-run with --delete-data to delete it."
