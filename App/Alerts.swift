@@ -32,13 +32,15 @@ final class Alerts {
             let key = "\(activation.sensor.rawValue)/\(activation.client ?? "")"
             earliest[key] = min(earliest[key] ?? .distantFuture, activation.start)
         }
+        var reached = watermarkBefore
         for activation in activations where activation.start > watermarkBefore {
-            watermark = max(watermark, activation.start)
+            reached = max(reached, activation.start)
             let firstUse =
                 activation.client != nil
                 && earliest["\(activation.sensor.rawValue)/\(activation.client ?? "")"] == activation.start
             post(for: activation, firstUse: firstUse)
         }
+        watermark = reached
     }
 
     /// The first use of a sensor by an app, plus every unattributed use — those the user can't
