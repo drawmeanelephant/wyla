@@ -54,7 +54,7 @@ struct SessionDetailView: View {
                 }
             }
             .frame(minHeight: 120, maxHeight: 220)
-            .task(id: session.id) {
+            .task(id: session.eventIDs) {
                 do {
                     events = try store.rawEvents(for: session)
                     error = nil
