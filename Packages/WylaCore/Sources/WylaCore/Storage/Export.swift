@@ -129,10 +129,13 @@ public enum AuditExport {
         // outside the range between rows inside it, so the link is checked only where ids are
         // consecutive; the count against the manifest is what catches removed rows.
         if rows.count != manifest.rowCount {
-            problem = .countMismatch(found: rows.count, manifest: manifest.rowCount)
+            let atRow = rows.count > manifest.rowCount ? rows[manifest.rowCount].id : (rows.last?.id ?? 0) + 1
+            problem = .countMismatch(found: rows.count, manifest: manifest.rowCount, atRow: atRow)
         }
         for row in rows where problem == nil {
-            if let last = previous, row.id == last.id + 1, row.prevHash != last.hash {
+            if let last = previous, row.id <= last.id {
+                problem = .brokenLink(id: row.id)
+            } else if let last = previous, row.id == last.id + 1, row.prevHash != last.hash {
                 problem = .brokenLink(id: row.id)
             } else if row.hash != row.expectedHash {
                 problem = .hashMismatch(id: row.id)
