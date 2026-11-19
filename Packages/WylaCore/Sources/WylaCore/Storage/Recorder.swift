@@ -236,6 +236,10 @@ public final class Recorder {
         }
     }
 
+    /// How far apart `log stream` and `log show` report the same entry's wall time at most;
+    /// the documented drift is about 1 ms.
+    private static let streamDriftMicros: Int64 = 10_000
+
     /// Counts the request in its one-minute bucket in `tcc_requests_agg`, deduplicated on
     /// (message_id, dedup_id): the log's msgID is `pid.counter`, which a process restart or
     /// reboot reuses, and its wall time drifts ~1 ms between `log stream` and `log show`, so
@@ -243,6 +247,19 @@ public final class Recorder {
     /// The client is the app TCC held responsible, so the totals name the app behind the check
     /// rather than a daemon such as `replayd` that made it on the app's behalf.
     private static func count(_ request: TCCRequest, in db: Database) throws {
+        // Requests stored before entryIDs existed dedup on their wall time (`dedup_id` equals
+        // `time_us` as text). Claim such a row for the same request — same msgID, wall time
+        // within the stream/show drift — so its replay upgrades to the mach time instead of
+        // inserting a second row and counting twice.
+        if request.entryID != nil {
+            try db.execute(
+                sql: """
+                    UPDATE tcc_requests SET dedup_id = ?
+                    WHERE message_id = ? AND dedup_id = CAST(time_us AS TEXT)
+                    AND abs(time_us - ?) <= ?
+                    """,
+                arguments: [request.dedupID, request.messageID, request.time.microseconds, Self.streamDriftMicros])
+        }
         try db.execute(
             sql: """
                 INSERT OR IGNORE INTO tcc_requests (message_id, dedup_id, time_us, raw_event_id)
