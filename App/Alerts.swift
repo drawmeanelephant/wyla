@@ -3,13 +3,18 @@ import UserNotifications
 import WylaCore
 
 /// Posts "first use" alerts for activations the store reloads, from the app's own bundle
-/// identity (the agent's notifications show as its binary, not the app). Alerts track a
-/// watermark so a run only reports activations newer than the ones it already reported;
-/// activations backfilled after the fact are labelled with their real time instead of read as
-/// live, and unattributed alerts are rate limited so a noisy sensor can't spam.
+/// identity (the agent's notifications show as its binary, not the app). Alerts track which
+/// activations they already reported so a run only reports new ones; activations backfilled or
+/// published late are labelled with their real time instead of read as live, and unattributed
+/// alerts are rate limited so a noisy sensor can't spam.
 @MainActor
 final class Alerts {
-    private var watermark: Date?
+    /// Activations already reported, by `Activation.id` (sensor/client/start). Gating on the
+    /// start time instead would drop an activation published late — an unattributed use, for
+    /// example, which surfaces a few seconds after it starts — because another activation may
+    /// have advanced the cutoff past its start.
+    private var seen: Set<String> = []
+    private var primed = false
     private var lastUnattributedAlert = Date.distantPast
     private let notified: UNUserNotificationCenter
 
@@ -20,10 +25,11 @@ final class Alerts {
 
     func report(on activations: [Activation], settings: Settings) {
         guard settings.notificationsEnabled else { return }
-        // The first read is history, not news: everything already recorded is older than the
-        // watermark, and only activations newer than it can be new to the user.
-        guard let watermarkBefore = watermark else {
-            watermark = activations.map(\.start).max() ?? .now
+        // The first read is history, not news: everything already recorded is remembered as
+        // seen, and only activations added later can be new to the user.
+        guard primed else {
+            primed = true
+            seen.formUnion(activations.map(\.id))
             return
         }
         // First use of a sensor by an app is the earliest activation it has on record.
@@ -32,15 +38,13 @@ final class Alerts {
             let key = "\(activation.sensor.rawValue)/\(activation.client ?? "")"
             earliest[key] = min(earliest[key] ?? .distantFuture, activation.start)
         }
-        var reached = watermarkBefore
-        for activation in activations where activation.start > watermarkBefore {
-            reached = max(reached, activation.start)
+        for activation in activations where !seen.contains(activation.id) {
+            seen.insert(activation.id)
             let firstUse =
                 activation.client != nil
                 && earliest["\(activation.sensor.rawValue)/\(activation.client ?? "")"] == activation.start
             post(for: activation, firstUse: firstUse)
         }
-        watermark = reached
     }
 
     /// The first use of a sensor by an app, plus every unattributed use — those the user can't
