@@ -43,6 +43,8 @@ actor Collector {
     private var resolvedApps: Set<String> = []
     private var notifiedWrites = -1
     private var appWrites = 0
+    /// The shared settings, reloaded on each heartbeat so the app's Settings tab applies.
+    private var settings = Settings()
     /// The longest time between a log event and its arrival on the live stream since the last heartbeat.
     private var maxLogDelay: TimeInterval = 0
 
@@ -190,6 +192,16 @@ actor Collector {
                 try recorder.heartbeat(at: .now)
                 return []
             }
+            settings = Settings.load(from: Settings.url(near: store.url))
+            if settings.anchorExportEnabled, let head = try? store.head() {
+                do {
+                    if try AnchorLog.append(head: head, to: AnchorLog.url(near: store.url)) {
+                        logger.info("Exported chain head \(head.id, privacy: .public)")
+                    }
+                } catch {
+                    logger.error("Anchor export failed: \(String(describing: error), privacy: .public)")
+                }
+            }
             notifyIfChanged()
         }
     }
@@ -204,6 +216,7 @@ actor Collector {
         do {
             for case .started(let activation) in try operation(recorder) {
                 resolveApps(of: activation)
+                Notifier.notify(onStart: activation, store: store, settings: settings)
             }
         } catch {
             logger.fault("Database error, exiting: \(String(describing: error), privacy: .public)")

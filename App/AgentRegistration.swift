@@ -34,6 +34,22 @@ final class AgentRegistration {
         refresh()
     }
 
+    /// Registers or unregisters the launchd agent, for the launch-at-login setting.
+    func setEnabled(_ enabled: Bool) {
+        do {
+            if enabled {
+                try service.register()
+            } else {
+                try service.unregister()
+            }
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+            logger.error("Agent \(enabled ? "registration" : "unregistration") failed: \(error.localizedDescription, privacy: .public)")
+        }
+        refresh()
+    }
+
     func refresh() {
         status = service.status
     }
