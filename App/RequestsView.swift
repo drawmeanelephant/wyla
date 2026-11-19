@@ -96,7 +96,9 @@ struct RequestsView: View {
                 if let selected = filtered.first(where: { $0.id == selection }) {
                     Divider()
                     historyChart(of: selected)
-                        .task(id: selected.id) {
+                        // The whole row is the task's identity so new checks — which change its
+                        // totals and lastSeen — refresh the chart too.
+                        .task(id: selected) {
                             history =
                                 (try? await store.requestDaily(client: selected.client, service: selected.service))
                                 ?? []

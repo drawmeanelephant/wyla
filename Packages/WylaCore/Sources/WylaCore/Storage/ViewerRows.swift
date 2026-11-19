@@ -58,7 +58,7 @@ public struct RawEvent: Sendable, Equatable {
 extension RawEvent: Identifiable {}
 
 /// Per-client totals of one TCC service's permission checks, grouped from `tcc_requests_agg`.
-public struct TCCSummary: Sendable, Equatable {
+public struct TCCSummary: Sendable, Equatable, Hashable {
     /// The app TCC held responsible, or "" when the request named no process.
     public let client: String
     /// The TCC service, for example `kTCCServiceCamera`.
