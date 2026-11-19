@@ -149,3 +149,12 @@ private struct Recorded {
     let beforeStart = SessionQuery(range: heartbeat..<heartbeat.addingTimeInterval(5))
     #expect(!beforeStart.matches(session, asOf: heartbeat))
 }
+
+@Test func lastUseNeverPrecedesTheSessionStart() throws {
+    // Same cutoff edge as `duration(asOf:)`: a session recorded after the dead agent's last
+    // heartbeat still counts its start as its last use.
+    let heartbeat = Date(timeIntervalSince1970: 1_800_000_000)
+    let sessions = SessionMerger.merge(
+        [Activation(sensor: .camera, client: "com.example", start: heartbeat.addingTimeInterval(10))])
+    #expect(AppSummary.all(from: sessions, asOf: heartbeat)[0].lastUse == heartbeat.addingTimeInterval(10))
+}

@@ -28,7 +28,7 @@ public struct AppSummary: Sendable, Equatable {
             summary.counts[session.sensor, default: 0] += 1
             summary.duration += session.duration(asOf: now)
             summary.firstUse = min(summary.firstUse, session.start)
-            summary.lastUse = max(summary.lastUse, session.end ?? now)
+            summary.lastUse = max(summary.lastUse, session.end ?? max(session.start, now))
             byClient[session.client] = summary
         }
         return byClient.values.sorted {
