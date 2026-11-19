@@ -108,10 +108,12 @@ public final class Recorder {
             }
         case .tccRequest(let request):
             checkpoints[.tcc] = max(checkpoints[.tcc] ?? time, time)
-            // Requests are counted, not chained: `tcc_requests` dedups them by (messageID, time)
-            // — the msgID is `pid.counter`, reused across restarts, so the time disambiguates —
-            // and the per-minute totals grow from there. Only a request that later links an
-            // activation to its responsible app joins the hash chain, in `persist`.
+            // Requests are counted, not chained: `tcc_requests` dedups them by (messageID,
+            // entry's mach time) — the msgID is `pid.counter`, reused across restarts, and the
+            // wall time drifts ~1 ms between `log stream` and `log show`, so the mach time is
+            // the request's identity — and the per-minute totals grow from there. Only a
+            // request that later links an activation to its responsible app joins the hash
+            // chain, in `persist`.
             recentRequests.append(request)
             return try apply(nil, .tccRequest(request), at: time) { db in
                 try Self.count(request, in: db)
@@ -235,14 +237,18 @@ public final class Recorder {
     }
 
     /// Counts the request in its one-minute bucket in `tcc_requests_agg`, deduplicated on
-    /// (message_id, time_us): the log's msgID is `pid.counter`, which a process restart or reboot
-    /// reuses, so the request's time disambiguates. The client is the app TCC held responsible,
-    /// so the totals name the app behind the check rather than a daemon such as `replayd` that
-    /// made it on the app's behalf.
+    /// (message_id, dedup_id): the log's msgID is `pid.counter`, which a process restart or
+    /// reboot reuses, and its wall time drifts ~1 ms between `log stream` and `log show`, so
+    /// the CTX entry's mach time is the request's identity — its wall time when it has none.
+    /// The client is the app TCC held responsible, so the totals name the app behind the check
+    /// rather than a daemon such as `replayd` that made it on the app's behalf.
     private static func count(_ request: TCCRequest, in db: Database) throws {
         try db.execute(
-            sql: "INSERT OR IGNORE INTO tcc_requests (message_id, time_us, raw_event_id) VALUES (?, ?, NULL)",
-            arguments: [request.messageID, request.time.microseconds])
+            sql: """
+                INSERT OR IGNORE INTO tcc_requests (message_id, dedup_id, time_us, raw_event_id)
+                VALUES (?, ?, ?, NULL)
+                """,
+            arguments: [request.messageID, request.dedupID, request.time.microseconds])
         guard db.changesCount > 0 else { return }
         let minute = request.time.microseconds / 60_000_000 * 60_000_000
         try db.execute(
@@ -265,17 +271,17 @@ public final class Recorder {
         else { return nil }
         let storedID = try Int64.fetchOne(
             db,
-            sql: "SELECT raw_event_id FROM tcc_requests WHERE message_id = ? AND time_us = ?",
-            arguments: [request.messageID, request.time.microseconds])
+            sql: "SELECT raw_event_id FROM tcc_requests WHERE message_id = ? AND dedup_id = ?",
+            arguments: [request.messageID, request.dedupID])
         if let storedID { return storedID }
         let appended = try EventStore.append(
             .tcc, time: request.time, identity: nil, message: try canonicalJSON(request), in: db)
         try db.execute(
             sql: """
                 UPDATE tcc_requests SET raw_event_id = ?
-                WHERE message_id = ? AND time_us = ? AND raw_event_id IS NULL
+                WHERE message_id = ? AND dedup_id = ? AND raw_event_id IS NULL
                 """,
-            arguments: [appended.id, request.messageID, request.time.microseconds])
+            arguments: [appended.id, request.messageID, request.dedupID])
         return appended.id
     }
 
