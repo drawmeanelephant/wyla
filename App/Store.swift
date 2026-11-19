@@ -45,6 +45,7 @@ final class Store {
     /// One reload at a time; notifications that arrive while one runs fold into a single
     /// trailing reload, so heartbeat writes don't queue up merge work.
     private var reloadInFlight = false
+    private let alerts = Alerts()
     private var reloadPending = false
 
     /// The agent heartbeats every 30 s while idle and every 5 s while an activation is open, so a
@@ -150,6 +151,7 @@ final class Store {
             requests = snapshot.requests
             lastHeartbeat = snapshot.heartbeat
             loadError = nil
+            alerts.report(on: snapshot.activations, settings: settings)
             refreshLiveness()
         case .failure(let error):
             loadError = error.localizedDescription
@@ -239,33 +241,48 @@ final class Store {
         sessions = SessionMerger.merge(activations, window: edited.mergeWindow)
     }
 
-    /// What the Health tab shows: the collector's coverage and the log quality it left.
-    func health() throws -> HealthInfo {
+    /// What the Health tab shows: the collector's coverage and the log quality it left. Reads
+    /// off the main actor — the queries walk the whole database.
+    func health() async throws -> HealthInfo {
         guard let store else { throw StoreError.noDatabase }
-        let coverage = try store.coverage()
-        var gaps: [(start: Date, end: Date)] = []
-        for index in coverage.indices.dropFirst() {
-            let previous = coverage[index - 1]
-            let current = coverage[index]
-            if current.start > previous.end {
-                gaps.append((previous.end, current.start))
+        let dbURL = Self.databaseURL()
+        return try await Task.detached {
+            let coverage = try store.coverage()
+            var gaps: [(start: Date, end: Date)] = []
+            for index in coverage.indices.dropFirst() {
+                let previous = coverage[index - 1]
+                let current = coverage[index]
+                // A run the agent ended cleanly wasn't a monitoring loss — restarts don't count.
+                if !previous.endedCleanly, current.start > previous.end {
+                    gaps.append((previous.end, current.start))
+                }
             }
-        }
-        return HealthInfo(
-            coverage: coverage, gaps: gaps, unparsedLines: try store.unparsedIndicatorCount(),
-            lastAnchor: try AnchorLog.latest(from: AnchorLog.url(near: Self.databaseURL())))
+            return HealthInfo(
+                coverage: coverage.map { ($0.start, $0.end) }, gaps: gaps,
+                unparsedLines: try store.unparsedCount(),
+                lastAnchor: try AnchorLog.latest(from: AnchorLog.url(near: dbURL)))
+        }.value
     }
 
-    /// Recomputes the hash chain and checks it against the latest exported anchor.
-    func verifyIntegrity() throws -> IntegrityReport {
+    /// Recomputes the hash chain off the main actor and checks it against every exported anchor;
+    /// the newest anchor whose row is missing reports as truncation.
+    func verifyIntegrity() async throws -> IntegrityReport {
         guard let store else { throw StoreError.noDatabase }
-        return try store.verifyIntegrity(anchor: try AnchorLog.earliest(from: AnchorLog.url(near: Self.databaseURL())))
+        let dbURL = Self.databaseURL()
+        return try await Task.detached {
+            let anchors = try AnchorLog.read(from: AnchorLog.url(near: dbURL)).map(\.anchor)
+            return try store.verifyIntegrity(anchors: anchors)
+        }.value
     }
 
-    /// Writes the range's raw events and sessions into `directory`, as CSV and JSON.
-    func export(from: Date, to end: Date, into directory: URL) throws -> ExportManifest {
+    /// Writes the range's raw events and sessions into `directory` off the main actor, as CSV
+    /// and JSON, merged with the user's merge-window setting.
+    func export(from: Date, to end: Date, into directory: URL) async throws -> ExportManifest {
         guard let store else { throw StoreError.noDatabase }
-        return try AuditExport.write(store: store, from: from, to: end, to: directory)
+        let mergeWindow = settings.mergeWindow
+        return try await Task.detached {
+            try AuditExport.write(store: store, from: from, to: end, to: directory, mergeWindow: mergeWindow)
+        }.value
     }
 
     enum StoreError: LocalizedError {

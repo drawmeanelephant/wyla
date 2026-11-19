@@ -161,12 +161,25 @@ public final class EventStore: Sendable {
         }
     }
 
-    /// The agent's coverage periods, oldest first: each agent run covers the time between its
-    /// start and its last heartbeat. Gaps between them are times nothing was monitoring.
-    public func coverage() throws -> [(start: Date, end: Date)] {
+    /// One agent run's coverage: when it started and when it last heartbeated.
+    public struct CoverageRun: Sendable, Equatable {
+        public let start: Date
+        public let end: Date
+        /// The agent stopped this run itself, so a gap after it is a restart, not lost
+        /// monitoring.
+        public let endedCleanly: Bool
+    }
+
+    /// The agent's coverage periods, oldest first.
+    public func coverage() throws -> [CoverageRun] {
         try pool.read { db in
-            try Row.fetchAll(db, sql: "SELECT started_us, last_heartbeat_us FROM coverage ORDER BY started_us").map {
-                (Date(microseconds: $0["started_us"]), Date(microseconds: $0["last_heartbeat_us"]))
+            try Row.fetchAll(
+                db,
+                sql: "SELECT started_us, last_heartbeat_us, ended_cleanly FROM coverage ORDER BY started_us"
+            ).map {
+                CoverageRun(
+                    start: Date(microseconds: $0["started_us"]), end: Date(microseconds: $0["last_heartbeat_us"]),
+                    endedCleanly: $0["ended_cleanly"] as Int == 1)
             }
         }
     }
@@ -202,14 +215,12 @@ public final class EventStore: Sendable {
         }
     }
 
-    /// The stored indicator lines the parser rejects — a sign that a new macOS log format needs a
-    /// fixture and a parser update.
-    public func unparsedIndicatorCount() throws -> Int {
-        let parser = IndicatorParser()
-        return try pool.read { db in
-            try String.fetchAll(db, sql: "SELECT message FROM raw_events WHERE source = 'indicator'")
-                .filter { if case .unparsed = parser.parse($0) { true } else { false } }
-                .count
+    /// The log lines the parsers reject across sources — a sign that a new macOS log format
+    /// needs a fixture and a parser update. Counted incrementally by the recorder into
+    /// `unparsed_lines` (migration v5 seeds existing indicator rows).
+    public func unparsedCount() throws -> Int {
+        try pool.read { db in
+            try Int.fetchOne(db, sql: "SELECT ifnull(sum(count), 0) FROM unparsed_lines") ?? 0
         }
     }
 
@@ -232,10 +243,11 @@ public final class EventStore: Sendable {
     }
 
     /// Recomputes the hash chain over `raw_events` and reports the first row that doesn't match.
-    /// With an `anchor` saved earlier, also checks that the chain still contains that row unchanged.
-    public func verifyIntegrity(anchor: ChainAnchor? = nil) throws -> IntegrityReport {
+    /// With `anchors` saved earlier, also checks that the chain still contains every anchored
+    /// row unchanged; the report names the newest anchor whose row is missing as truncation.
+    public func verifyIntegrity(anchors: [ChainAnchor] = []) throws -> IntegrityReport {
         try pool.read { db in
-            var verifier = ChainVerifier(anchor: anchor)
+            var verifier = ChainVerifier(anchors: anchors)
             let rows = try Row.fetchCursor(
                 db, sql: "SELECT id, time_us, source, message, dedup_key, prev_hash, hash FROM raw_events ORDER BY id")
             while let row = try rows.next() {
@@ -321,14 +333,15 @@ public struct IntegrityReport: Sendable, Equatable {
 }
 
 private struct ChainVerifier {
-    let anchor: ChainAnchor?
+    /// Anchors by row id, saved by `anchors.log` on previous days.
+    private let anchors: [Int64: String]
     private var previous: ChainAnchor?
     private var verifiedRows = 0
-    private var anchorFound = false
+    private var foundAnchors: Set<Int64> = []
     private var problem: IntegrityProblem?
 
-    init(anchor: ChainAnchor?) {
-        self.anchor = anchor
+    init(anchors: [ChainAnchor]) {
+        self.anchors = Dictionary(anchors.map { ($0.id, $0.hash) }, uniquingKeysWith: { first, _ in first })
     }
 
     /// Returns true when the row has a problem, which ends the check.
@@ -348,16 +361,19 @@ private struct ChainVerifier {
             if hash != expected.hash { problem = .hashMismatch(id: id) }
         }
         if problem != nil { return true }
+        if anchors[id] == hash { foundAnchors.insert(id) }
         previous = ChainAnchor(id: id, hash: hash)
         verifiedRows += 1
-        if previous == anchor { anchorFound = true }
         return false
     }
 
     func report() -> IntegrityReport {
         var problem = problem
-        if problem == nil, let anchor, !anchorFound {
-            problem = .anchorMismatch(anchor)
+        // The newest anchor whose row is missing or changed: rows were removed from the end,
+        // or the chain was rewritten from there on. Older missing anchors can only be a
+        // consequence of the same break, so the newest names it.
+        if problem == nil, let missing = anchors.keys.filter({ !foundAnchors.contains($0) }).max() {
+            problem = .anchorMismatch(ChainAnchor(id: missing, hash: anchors[missing] ?? ""))
         }
         return IntegrityReport(verifiedRows: verifiedRows, head: previous, problem: problem)
     }

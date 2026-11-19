@@ -15,7 +15,34 @@ enum Schema {
             try db.execute(sql: version3)
         }
         migrator.registerMigration("v4", migrate: version4)
+        migrator.registerMigration("v5", migrate: version5)
         return migrator
+    }
+
+    /// Incremental counters for unparsed log lines (one per source) and a flag on `coverage`
+    /// marking runs the agent ended cleanly — so a normal restart isn't counted as a monitoring
+    /// gap. Existing indicator lines are re-parsed once to seed the counter; TCC lines were
+    /// never stored, so the `tcc` count starts at zero.
+    private static func version5(_ db: Database) throws {
+        try db.execute(
+            sql: """
+                ALTER TABLE coverage ADD COLUMN ended_cleanly INTEGER NOT NULL DEFAULT 0;
+                CREATE TABLE unparsed_lines (
+                    source TEXT PRIMARY KEY,
+                    count INTEGER NOT NULL
+                );
+                """)
+        let parser = IndicatorParser()
+        let messages = try String.fetchAll(
+            db, sql: "SELECT message FROM raw_events WHERE source = 'indicator'")
+        let unparsed = messages.filter {
+            if case .unparsed = parser.parse($0) { true } else { false }
+        }.count
+        if unparsed > 0 {
+            try db.execute(
+                sql: "INSERT INTO unparsed_lines (source, count) VALUES ('indicator', ?)",
+                arguments: [unparsed])
+        }
     }
 
     /// Databases that ran v3 before `dedup_id` was added (the first pushed revision of this

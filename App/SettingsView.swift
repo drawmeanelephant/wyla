@@ -40,7 +40,7 @@ struct SettingsView: View {
                 Text("Save the hash chain's head once a day, so a later verification can tell whether the chain still contains it.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                LabeledContent("Launch at login") {
+                LabeledContent("Start monitoring at login") {
                     HStack {
                         Text(registration.summary).foregroundStyle(.secondary)
                         Spacer()
@@ -49,6 +49,12 @@ struct SettingsView: View {
                         }
                     }
                 }
+                Text(
+                    "This toggles the background collector that records sensor use — disabling it stops all monitoring. "
+                        + "The app itself doesn't use a login item; reopen it manually."
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
             }
 
             if let error {

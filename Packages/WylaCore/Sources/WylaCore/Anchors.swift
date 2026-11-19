@@ -1,8 +1,14 @@
 import Foundation
 
 /// A daily record of the hash chain's head, kept outside the database so that a later
-/// `verifyIntegrity(anchor:)` can tell whether the chain still contains that row unchanged.
-/// One JSON line per UTC day, in `anchors.log` next to the database.
+/// `verifyIntegrity(anchors:)` can tell whether the chain still contains every saved head
+/// unchanged — the newest anchor whose row is missing reports as truncation.
+///
+/// One JSON line per UTC day, in `anchors.log` next to the database. Sharing the database's
+/// folder is the weak point of the design: someone who can rewrite the chain can also rewrite
+/// this file, so the anchors only detect tampering with the database alone. `AnchorLog.url` is
+/// where `--verify` and the Health view read it, so copy it somewhere else if it needs to
+/// outlive the database.
 public enum AnchorLog {
     public static func url(near databaseURL: URL = EventStore.defaultURL) -> URL {
         databaseURL.deletingLastPathComponent().appending(path: "anchors.log")
@@ -40,13 +46,6 @@ public enum AnchorLog {
     /// The most recent saved anchor, for display.
     public static func latest(from url: URL = AnchorLog.url()) throws -> ChainAnchor? {
         try read(from: url).last?.anchor
-    }
-
-    /// The oldest saved anchor, for `verifyIntegrity(anchor:)`. Verifying against the newest
-    /// would let a database rewrite be adopted silently by the next day's anchor; the oldest
-    /// can only stay valid while the chain still reaches back to it unchanged.
-    public static func earliest(from url: URL = AnchorLog.url()) throws -> ChainAnchor? {
-        try read(from: url).first?.anchor
     }
 
     private static let dayFormatter: DateFormatter = {
