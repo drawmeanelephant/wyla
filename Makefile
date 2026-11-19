@@ -17,7 +17,7 @@ XCODEBUILD := xcodebuild -project $(PROJECT) -scheme $(SCHEME) -configuration De
 VERSION ?= dev
 
 .PHONY: help bootstrap tools hooks generate build run test coverage lint format format-check \
-	analyze duplicates qa integration-test check release-zip open clean
+	analyze duplicates qa integration-test check release-zip install uninstall uninstall-data open clean
 
 help: ## List make targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "%-18s %s\n", $$1, $$2}'
@@ -82,6 +82,19 @@ release-zip: generate ## Build Release and zip Wyla.app into build/release (VERS
 		|| { tail -n 60 build/xcodebuild-release.log; exit 1; }
 	ditto -c -k --norsrc --noextattr --noacl --keepParent build/ReleaseDerivedData/Build/Products/Release/Wyla.app build/release/WYLA-$(VERSION).zip
 	@echo "build/release/WYLA-$(VERSION).zip"
+
+install: generate ## Build Release, copy WYLA into /Applications, and open it
+	xcodebuild -project $(PROJECT) -scheme $(SCHEME) -configuration Release -destination 'generic/platform=macOS' \
+		-derivedDataPath build/ReleaseDerivedData $(XCODEBUILD_FLAGS) build > build/xcodebuild-release.log \
+		|| { tail -n 60 build/xcodebuild-release.log; exit 1; }
+	ditto --norsrc build/ReleaseDerivedData/Build/Products/Release/Wyla.app /Applications/Wyla.app
+	open /Applications/Wyla.app
+
+uninstall: ## Stop the agent and app, then remove WYLA from /Applications (keeps the log)
+	scripts/uninstall.sh
+
+uninstall-data: ## Like uninstall, and also deletes the recorded database and settings
+	scripts/uninstall.sh --delete-data
 
 open: generate ## Open the generated Xcode project
 	open $(PROJECT)

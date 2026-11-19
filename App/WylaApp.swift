@@ -21,5 +21,6 @@ struct WylaApp: App {
         registration.register()
         _registration = State(initialValue: registration)
         _store = State(initialValue: Store())
+        OnboardingWindow.showIfFirstRun(registration: registration)
     }
 }
