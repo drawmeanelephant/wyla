@@ -89,6 +89,28 @@ private func request(
     #expect(try temporary.rows("SELECT * FROM tcc_requests WHERE raw_event_id IS NOT NULL").isEmpty)
 }
 
+@Test func theSameEntryWithADriftedWallTimeCountsOnce() throws {
+    let temporary = try TemporaryStore()
+    let start = Date(timeIntervalSince1970: 1_800_000_000)
+    let recorder = try Recorder(store: temporary.store, startingAt: start)
+    // `log show` backfill and `log stream` report the same CTX entry ~1 ms apart in wall time
+    // but with the same mach time: the entryID, not the wall time, is the dedup identity.
+    try recorder.record(.tccRequest(request(messageID: "1.2", at: start, entryID: "mach-7")))
+    try recorder.record(
+        .tccRequest(request(messageID: "1.2", at: start.addingTimeInterval(0.001), entryID: "mach-7")))
+    #expect(try temporary.rows("SELECT count FROM tcc_requests_agg").map { $0["count"] as Int } == [1])
+}
+
+private func request(
+    _ identifier: String? = "com.example.app", service: String = "kTCCServiceCamera", authValue: Int = 2,
+    messageID: String? = nil, at time: Date, entryID: String? = nil
+) -> TCCRequest {
+    TCCRequest(
+        messageID: messageID ?? UUID().uuidString, time: time, service: service,
+        responsible: identifier.map { TCCProcess(identifier: $0, pid: 1, binaryPath: nil) },
+        accessing: nil, requesting: nil, authValue: authValue, entryID: entryID)
+}
+
 @Test func aRequestCompletedLateIsStillCounted() throws {
     let temporary = try TemporaryStore()
     let start = Date(timeIntervalSince1970: 1_800_000_000)

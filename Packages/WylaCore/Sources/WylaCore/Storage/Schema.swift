@@ -17,22 +17,26 @@ enum Schema {
         return migrator
     }
 
-    /// Every completed TCC request, deduplicated on (message_id, time_us): the log's msgID is
-    /// `pid.counter`, which a process restart or reboot reuses, so the request's time
-    /// disambiguates. `raw_event_id` is NULL until the request links an activation to its
+    /// Every completed TCC request, deduplicated on (message_id, dedup_id): `dedup_id` is the
+    /// CTX entry's mach time — `log stream` and `log show` report the same entry ~1 ms apart in
+    /// wall time but identical mach time — falling back to the request's wall time when the
+    /// entry carried no id. `raw_event_id` is NULL until the request links an activation to its
     /// responsible app — only linking requests join the hash chain; the rest exist here only as
     /// dedup rows feeding `tcc_requests_agg`. Existing request events backfill the table: their
     /// stored JSON carries the messageID and `time` (JSONEncoder's seconds since 2001).
     private static let version3 = """
         CREATE TABLE tcc_requests (
             message_id TEXT NOT NULL,
+            dedup_id TEXT NOT NULL,
             time_us INTEGER NOT NULL,
             raw_event_id INTEGER REFERENCES raw_events(id),
-            PRIMARY KEY (message_id, time_us)
+            PRIMARY KEY (message_id, dedup_id)
         ) WITHOUT ROWID;
-        INSERT OR IGNORE INTO tcc_requests (message_id, time_us, raw_event_id)
+        INSERT OR IGNORE INTO tcc_requests (message_id, dedup_id, time_us, raw_event_id)
             SELECT json_extract(message, '$.messageID'),
-                CAST((json_extract(message, '$.time') + 978307200) * 1000000 AS INTEGER),
+                ifnull(json_extract(message, '$.entryID'),
+                    CAST(CAST((json_extract(message, '$.time') + 978307200) * 1000000 + 0.5 AS INTEGER) AS TEXT)),
+                CAST((json_extract(message, '$.time') + 978307200) * 1000000 + 0.5 AS INTEGER),
                 id FROM raw_events
             WHERE source = 'tcc' AND json_extract(message, '$.messageID') IS NOT NULL;
         -- Databases that predate the Requests totals stored request events without counting
