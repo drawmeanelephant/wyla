@@ -108,7 +108,13 @@ public enum AuditExport {
         store: EventStore, from: Date, to end: Date, to directory: URL,
         mergeWindow: TimeInterval = SessionMerger.defaultWindow
     ) throws -> ExportManifest {
-        let rows = try store.chainedEvents(from: from, to: end)
+        let timeRows = try store.chainedEvents(from: from, to: end)
+        // Backfill can append rows with older timestamps after newer ones, so the time-filtered
+        // set can skip ids; the verifier requires contiguity, so export the whole id span.
+        var rows = timeRows
+        if let first = timeRows.first, let last = timeRows.last {
+            rows = try store.chainedEvents(idsIn: first.id...last.id)
+        }
         let hashes = Dictionary(rows.map { ($0.id, $0.hash) }, uniquingKeysWith: { first, _ in first })
         let sessions = SessionMerger.merge(try store.activations(from: from, to: end), window: mergeWindow)
         let manifest = ExportManifest(
@@ -134,20 +140,26 @@ public enum AuditExport {
         return manifest
     }
 
-    /// Writes `data` to `url` with owner-only permissions; exports hold personal data.
+    /// Writes `data` to `url` with owner-only permissions; exports hold personal data. A failed
+    /// write throws — reporting success for a missing file would produce a corrupt export.
     private static func writeFile(_ data: Data, to url: URL) throws {
-        FileManager.default.createFile(
-            atPath: url.path(percentEncoded: false), contents: data,
-            attributes: [.posixPermissions: 0o600])
+        guard
+            FileManager.default.createFile(
+                atPath: url.path(percentEncoded: false), contents: data,
+                attributes: [.posixPermissions: 0o600])
+        else {
+            throw CocoaError(.fileWriteUnknown)
+        }
     }
 
     /// Recomputes the hash chain of an exported `raw_events.json` (the CSV files are not
     /// verified) and checks the result against the manifest's head. Rows must be contiguous
     /// (`id == previous + 1`), the first row's `prev_hash` must be the genesis value or — for a
-    /// partial export — the hash `anchors` recorded for the row before it, and every anchor
-    /// inside the export's day range must appear unchanged; the newest missing one reports as
-    /// truncation. `anchors` are the `(day, anchor)` pairs from `anchors.log`, whose days limit
-    /// the check to anchors the exported range covers.
+    /// partial export — the hash `anchors` recorded for the row before it, and every anchor the
+    /// range provably covers must appear unchanged; the newest missing one reports as
+    /// truncation. `anchors` are the `(day, anchor)` pairs from `anchors.log`. A day strictly
+    /// inside the range is covered; a boundary day only when the manifest covers it whole, so a
+    /// partial-day export doesn't flag an anchor written later that day.
     public static func verify(
         directory: URL,
         anchors: [(day: String, anchor: ChainAnchor)] = []
@@ -165,7 +177,17 @@ public enum AuditExport {
         dayFormatter.timeZone = TimeZone(identifier: "UTC")
         let firstDay = dayFormatter.string(from: manifest.from)
         let lastDay = dayFormatter.string(from: manifest.end)
-        let coveredAnchors = anchors.filter { $0.day >= firstDay && $0.day <= lastDay }.map(\.anchor)
+        // An anchor is required when the export provably covers its row: a day strictly inside
+        // the range always qualifies; on a boundary day only when the manifest covers the whole
+        // day — a partial-day export legitimately misses an anchor written later that day.
+        let firstDayStart = dayFormatter.date(from: firstDay) ?? .distantPast
+        let lastDayEnd = dayFormatter.date(from: lastDay).map { $0 + 86399 } ?? .distantFuture
+        let coveredAnchors = anchors.filter { entry in
+            if entry.day > firstDay && entry.day < lastDay { return true }
+            if entry.day == firstDay && manifest.from <= firstDayStart { return true }
+            if entry.day == lastDay && manifest.end >= lastDayEnd { return true }
+            return false
+        }.map(\.anchor)
         let rowIDs = Set(rows.map(\.id))
         var problem: IntegrityProblem?
         if rows.count != manifest.rowCount {
@@ -183,12 +205,11 @@ public enum AuditExport {
                 verifiedRows += 1
             }
         }
-        // The newest covered anchor whose row is missing reports as truncation. The check is
-        // not bounded by the manifest's head — lowering it is exactly what a forged manifest
-        // does after deleting the tail. Covered anchors before the first row belong to the
-        // partial export's prefix and are not required as rows.
-        if problem == nil, let first = rows.first?.id {
-            let missing = coveredAnchors.filter { $0.id >= first && !rowIDs.contains($0.id) }.max { $0.id < $1.id }
+        // The newest covered anchor whose row is missing reports as truncation. The check runs
+        // even on an empty export — clearing every row and the manifest must not pass — and is
+        // not bounded by the manifest's head, which a forgery lowers after deleting the tail.
+        if problem == nil {
+            let missing = coveredAnchors.filter { !rowIDs.contains($0.id) }.max { $0.id < $1.id }
             if let missing {
                 problem = .anchorMismatch(missing)
             }
