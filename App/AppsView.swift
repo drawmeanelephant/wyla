@@ -8,7 +8,7 @@ struct AppsView: View {
     @State private var selection: AppSummary.ID?
 
     private var summaries: [AppSummary] {
-        AppSummary.all(from: store.sessions, asOf: .now)
+        AppSummary.all(from: store.sessions, asOf: store.liveAsOf)
     }
 
     var body: some View {
@@ -73,7 +73,7 @@ struct AppsView: View {
 
     /// Total time per day for the selected app, stacked by sensor.
     private func history(of summary: AppSummary) -> some View {
-        let uses = DailyUse.of(store.sessions.filter { $0.client == summary.client }, asOf: .now)
+        let uses = DailyUse.of(store.sessions.filter { $0.client == summary.client }, asOf: store.liveAsOf)
         return VStack(alignment: .leading) {
             Text("\(name(of: summary)) — daily total")
                 .font(.headline)

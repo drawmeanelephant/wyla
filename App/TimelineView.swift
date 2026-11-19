@@ -14,7 +14,7 @@ struct TimelineView: View {
     private var filtered: [Session] {
         var query = query
         query.range = rangeEnabled ? min(rangeFrom, rangeTo)..<max(rangeFrom, rangeTo) : nil
-        return query.apply(to: store.sessions).sorted { $0.start > $1.start }
+        return query.apply(to: store.sessions, asOf: store.liveAsOf).sorted { $0.start > $1.start }
     }
 
     var body: some View {

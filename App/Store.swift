@@ -33,9 +33,9 @@ final class Store {
     /// The object the Darwin notification callback is registered for.
     private let relay = NotificationRelay()
 
-    /// While an activation is open the agent heartbeats every 5 s, so an open activation with a
+    /// The agent heartbeats every 30 s while idle and every 5 s while an activation is open, so a
     /// heartbeat older than this belongs to a dead agent.
-    static let livenessWindow: TimeInterval = 15
+    static let livenessWindow: TimeInterval = 45
 
     /// Tests set `WYLA_DATABASE` to view a database other than the agent's.
     static func databaseURL() -> URL {
@@ -102,9 +102,12 @@ final class Store {
     }
 
     /// What "now" means to the viewer: the present while the agent runs, its last heartbeat once
-    /// it is dead, so a session it left open stops growing.
+    /// it is dead, so a session it left open stops growing. Never earlier than the newest open
+    /// activation's start, which the agent recorded after that heartbeat.
     var liveAsOf: Date {
-        monitoringLive ? .now : lastHeartbeat ?? .now
+        if monitoringLive { return .now }
+        let lastStart = activations.filter { $0.end == nil }.map(\.start).max() ?? .distantPast
+        return max(lastHeartbeat ?? .now, lastStart)
     }
 
     /// The activations still running, latest first. Empty when the agent is dead: the open
