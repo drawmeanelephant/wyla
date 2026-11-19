@@ -17,8 +17,10 @@ final class AgentRegistration {
         status = service.status
     }
 
-    /// Registers the agent unless it is already enabled. macOS asks the user to allow it in Login
-    /// Items the first time; until then the status is `requiresApproval`.
+    /// Registers the agent unless it is already enabled for this bundle. macOS asks the user to
+    /// allow it in Login Items the first time; until then the status is `requiresApproval`. When
+    /// the bundle moved or was replaced since the registration that is on file, the agent is
+    /// re-registered so launchd doesn't keep launching the stale copy.
     func register() {
         // Tests launch the app from the build folder with `-WylaSkipAgentRegistration YES`, so
         // that they don't register a launchd agent for that copy. `launchAtLoginOptOut` is the
@@ -26,16 +28,49 @@ final class AgentRegistration {
         // relaunch, so the automatic registration leaves an opted-out service alone.
         let skipped = UserDefaults.standard.bool(forKey: "WylaSkipAgentRegistration")
         let optedOut = UserDefaults.standard.bool(forKey: Self.launchAtLoginOptOut)
-        if service.status != .enabled, !skipped, !optedOut {
-            do {
+        guard !skipped, !optedOut else {
+            refresh()
+            return
+        }
+        do {
+            if service.status == .enabled, Self.registeredSignature != Self.bundleSignature {
+                // Re-register: the bundle moved or was replaced since the saved signature, and
+                // the status read after unregister is stale, so register unconditionally.
+                try service.unregister()
                 try service.register()
-                lastError = nil
-            } catch {
-                lastError = error.localizedDescription
-                logger.error("Agent registration failed: \(error.localizedDescription, privacy: .public)")
+            } else if service.status != .enabled {
+                try service.register()
             }
+            Self.registeredSignature = Self.bundleSignature
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+            logger.error("Agent registration failed: \(error.localizedDescription, privacy: .public)")
         }
         refresh()
+    }
+
+    /// Which bundle the launchd registration was made from, so a moved or replaced bundle can
+    /// be re-registered instead of silently launching the stale copy.
+    private static var registeredSignature: String? {
+        get { UserDefaults.standard.string(forKey: "WylaRegisteredBundle") }
+        set { UserDefaults.standard.set(newValue, forKey: "WylaRegisteredBundle") }
+    }
+
+    private static var bundleSignature: String {
+        let version = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
+        return "\(Bundle.main.bundlePath)@\(version)"
+    }
+
+    /// Drops the registration; `scripts/uninstall.sh` runs the app binary with
+    /// `--unregister-agent` for this before it deletes the bundle.
+    static func unregister() {
+        do {
+            try SMAppService.agent(plistName: plistName).unregister()
+        } catch {
+            FileHandle.standardError.write(Data("unregister failed: \(error.localizedDescription)\n".utf8))
+        }
+        registeredSignature = nil
     }
 
     /// The user default that records an explicit launch-at-login choice, so a disabled agent
