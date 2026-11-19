@@ -108,15 +108,16 @@ public final class Recorder {
             }
         case .tccRequest(let request):
             checkpoints[.tcc] = max(checkpoints[.tcc] ?? time, time)
-            // Requests join the hash chain keyed by their messageID, so the same request from
-            // backfill and the live stream — or replayed after a restart — is counted once, while
-            // a new request completed late still is.
+            // Requests join the hash chain with the documented time identity; `tcc_requests`
+            // dedups them by messageID in the same transaction, so the same request from
+            // backfill and the live stream — or replayed after a restart — is counted once,
+            // while a new request completed late still is.
             recentRequests.append(request)
             return try apply(
-                RawInput(source: .tcc, time: time, identity: request.messageID, message: try canonicalJSON(request)),
+                RawInput(source: .tcc, time: time, identity: nil, message: try canonicalJSON(request)),
                 .tccRequest(request), at: time
-            ) { db in
-                try Self.aggregate(request, in: db)
+            ) { db, eventID in
+                try Self.count(request, event: eventID, in: db)
             }
         case .hardware(let change):
             return try apply(RawInput(source: .hardware, time: time, identity: nil, message: change.message), .hardware(change), at: time)
@@ -173,10 +174,10 @@ public final class Recorder {
     /// Stores the raw event if it is new, runs the builder, and stores the activation changes, all
     /// in one transaction. The builder is updated only after the transaction commits. `sideEffect`
     /// adds derived data (the TCC per-minute totals) to the same transaction; it runs only when the
-    /// raw event is new, so a request completed late is counted and a replayed one is not.
+    /// raw event is new, and receives its id.
     private func apply(
         _ raw: RawInput?, _ input: BuilderInput?, at time: Date,
-        sideEffect: ((Database) throws -> Void)? = nil
+        sideEffect: ((Database, Int64) throws -> Void)? = nil
     ) throws -> [ActivationEvent] {
         var next = builder
         var events: [ActivationEvent] = []
@@ -193,7 +194,7 @@ public final class Recorder {
                 guard appended.isNew else { return }
                 events = build()
                 try persist(events, currentEvent: (time.microseconds, appended.id), in: db)
-                try sideEffect?(db)
+                try sideEffect?(db, appended.id)
             }
         } else {
             events = build()
@@ -233,10 +234,15 @@ public final class Recorder {
         }
     }
 
-    /// Adds the request to its one-minute bucket in `tcc_requests_agg`. The client is the app TCC
-    /// held responsible, so the totals name the app behind the check rather than a daemon such as
+    /// Records the request's messageID against its raw event, and adds it to its one-minute
+    /// bucket in `tcc_requests_agg` when the ID is new. The client is the app TCC held
+    /// responsible, so the totals name the app behind the check rather than a daemon such as
     /// `replayd` that made it on the app's behalf.
-    private static func aggregate(_ request: TCCRequest, in db: Database) throws {
+    private static func count(_ request: TCCRequest, event: Int64, in db: Database) throws {
+        try db.execute(
+            sql: "INSERT OR IGNORE INTO tcc_requests (message_id, raw_event_id) VALUES (?, ?)",
+            arguments: [request.messageID, event])
+        guard db.changesCount > 0 else { return }
         let minute = request.time.microseconds / 60_000_000 * 60_000_000
         try db.execute(
             sql: """
@@ -254,13 +260,17 @@ public final class Recorder {
                     && activation.start.timeIntervalSince($0.time) <= SessionBuilder.responsibleMatchWindow
             })
         else { return nil }
-        // The request's own raw event — recorded with its messageID as the identity — is usually
-        // stored already; reuse it so the activation links to it rather than a duplicate.
-        let dedupKey = HashChain.dedupKey(source: .tcc, identity: request.messageID, message: try canonicalJSON(request))
-        if let stored = try Int64.fetchOne(db, sql: "SELECT id FROM raw_events WHERE dedup_key = ?", arguments: [dedupKey]) {
-            return stored
-        }
-        return try EventStore.append(.tcc, time: request.time, identity: nil, message: try canonicalJSON(request), in: db).id
+        // The request's own raw event is usually recorded already; reuse it so the activation
+        // links to it rather than a duplicate.
+        let storedID = try Int64.fetchOne(
+            db, sql: "SELECT raw_event_id FROM tcc_requests WHERE message_id = ?", arguments: [request.messageID])
+        if let storedID { return storedID }
+        let appended = try EventStore.append(
+            .tcc, time: request.time, identity: nil, message: try canonicalJSON(request), in: db)
+        try db.execute(
+            sql: "INSERT OR IGNORE INTO tcc_requests (message_id, raw_event_id) VALUES (?, ?)",
+            arguments: [request.messageID, appended.id])
+        return appended.id
     }
 
     private func write(_ updates: (Database) throws -> Void) throws {

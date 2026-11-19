@@ -11,8 +11,25 @@ enum Schema {
         migrator.registerMigration("v2") { db in
             try db.execute(sql: version2)
         }
+        migrator.registerMigration("v3") { db in
+            try db.execute(sql: version3)
+        }
         return migrator
     }
+
+    /// The messageID of every completed TCC request, linked to its raw event. A request reaches
+    /// the recorder twice when `log show` backfill and `log stream` overlap, so the recorder
+    /// counts a request only when its messageID is new. Existing request events backfill the
+    /// table: their stored JSON carries the messageID.
+    private static let version3 = """
+        CREATE TABLE tcc_requests (
+            message_id TEXT PRIMARY KEY,
+            raw_event_id INTEGER NOT NULL REFERENCES raw_events(id)
+        ) WITHOUT ROWID;
+        INSERT INTO tcc_requests (message_id, raw_event_id)
+            SELECT json_extract(message, '$.messageID'), id FROM raw_events
+            WHERE source = 'tcc' AND json_extract(message, '$.messageID') IS NOT NULL;
+        """
 
     /// Marks clients that Control Center names by executable name, such as `bash`.
     private static let version2 = """
