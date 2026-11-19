@@ -91,6 +91,31 @@ private func request(
     #expect(try temporary.rows("SELECT count FROM tcc_requests_agg").map { $0["count"] as Int } == [1])
 }
 
+@Test func aReplayWithAKeyCollisionMergesTheTwinRows() throws {
+    let temporary = try TemporaryStore()
+    let start = Date(timeIntervalSince1970: 1_800_000_000)
+    let recorder = try Recorder(store: temporary.store, startingAt: start)
+    // A replay once outside the drift window left a wall-time-keyed row next to the
+    // mach-time-keyed one. The next replay inside it must merge them, not crash on the
+    // primary key.
+    try temporary.tamper(
+        """
+        INSERT INTO tcc_requests (message_id, dedup_id, time_us, raw_event_id)
+        VALUES ('1.2', '1800000000000000', 1800000000000000, NULL);
+        INSERT INTO tcc_requests (message_id, dedup_id, time_us, raw_event_id)
+        VALUES ('1.2', 'mach-9', 1800000000001000, NULL);
+        -- The twin rows meant this request was already counted twice in its minute bucket.
+        INSERT INTO tcc_requests_agg (minute_us, client, service, auth_value, count)
+        VALUES (1800000000000000, 'com.example.app', 'kTCCServiceCamera', 2, 2);
+        """)
+    try recorder.record(
+        .tccRequest(request(messageID: "1.2", at: start.addingTimeInterval(0.001), entryID: "mach-9")))
+    let rows = try temporary.rows("SELECT dedup_id FROM tcc_requests")
+    #expect(rows.map { $0["dedup_id"] as String } == ["mach-9"])
+    // The historical double-count stands; the replay must not add a third.
+    #expect(try temporary.rows("SELECT count FROM tcc_requests_agg").map { $0["count"] as Int } == [2])
+}
+
 @Test func requestsWithoutARawEventAreNotInTheChain() throws {
     let temporary = try TemporaryStore()
     let start = Date(timeIntervalSince1970: 1_800_000_000)

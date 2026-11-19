@@ -250,8 +250,30 @@ public final class Recorder {
         // Requests stored before entryIDs existed dedup on their wall time (`dedup_id` equals
         // `time_us` as text). Claim such a row for the same request — same msgID, wall time
         // within the stream/show drift — so its replay upgrades to the mach time instead of
-        // inserting a second row and counting twice.
+        // inserting a second row and counting twice. A replay that once missed the drift window
+        // can leave a wall-time twin next to the mach-time row: an update would collide with the
+        // existing primary key, so that twin is deleted instead, after its chain link moves to
+        // the surviving row.
         if request.entryID != nil {
+            try db.execute(
+                sql: """
+                    UPDATE tcc_requests SET raw_event_id = (
+                        SELECT legacy.raw_event_id FROM tcc_requests legacy
+                        WHERE legacy.message_id = tcc_requests.message_id
+                        AND legacy.dedup_id = CAST(legacy.time_us AS TEXT)
+                        AND abs(legacy.time_us - ?) <= ? LIMIT 1)
+                    WHERE message_id = ? AND dedup_id = ? AND raw_event_id IS NULL
+                    """,
+                arguments: [request.time.microseconds, Self.streamDriftMicros, request.messageID, request.dedupID])
+            try db.execute(
+                sql: """
+                    DELETE FROM tcc_requests
+                    WHERE message_id = ? AND dedup_id = CAST(time_us AS TEXT) AND abs(time_us - ?) <= ?
+                    AND EXISTS (
+                        SELECT 1 FROM tcc_requests twin
+                        WHERE twin.message_id = tcc_requests.message_id AND twin.dedup_id = ?)
+                    """,
+                arguments: [request.messageID, request.time.microseconds, Self.streamDriftMicros, request.dedupID])
             try db.execute(
                 sql: """
                     UPDATE tcc_requests SET dedup_id = ?
