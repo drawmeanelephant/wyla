@@ -74,7 +74,12 @@ func exportIfAsked(_ url: URL) {
             let manifest = try AuditExport.write(
                 store: EventStore(url: url), from: from.date, to: inclusiveEnd, to: directory,
                 mergeWindow: settings.mergeWindow)
-            print("Exported \(manifest.rowCount) events and \(manifest.sessionCount) sessions to \(directory.path(percentEncoded: false))")
+            let outside =
+                manifest.skipped.isEmpty
+                ? "" : " (\(manifest.skipped.count) rows outside the range, ids in manifest.skipped)"
+            print(
+                "Exported \(manifest.rowCount) events and \(manifest.sessionCount) sessions to "
+                    + "\(directory.path(percentEncoded: false))\(outside)")
             exit(EXIT_SUCCESS)
         } catch {
             print("ERROR: \(error)")

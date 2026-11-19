@@ -50,22 +50,42 @@ public struct ExportManifest: Sendable, Equatable, Codable {
     public let head: ChainAnchor?
     public let rowCount: Int
     public let sessionCount: Int
+    /// Rows inside the exported id span that fell outside the requested range — usually
+    /// events backfilled late. Their contents stay out of the export so a shared file
+    /// doesn't leak history beyond the chosen range; their ids and hashes keep the chain
+    /// verifiable end to end.
+    public let skipped: [ChainAnchor]
 
     enum CodingKeys: String, CodingKey {
-        case end, head
+        case end, head, skipped
         case exportedAt = "exported_at"
         case from
         case rowCount = "row_count"
         case sessionCount = "session_count"
     }
 
-    public init(exportedAt: Date, from: Date, end: Date, head: ChainAnchor?, rowCount: Int, sessionCount: Int) {
+    public init(
+        exportedAt: Date, from: Date, end: Date, head: ChainAnchor?, rowCount: Int,
+        sessionCount: Int, skipped: [ChainAnchor] = []
+    ) {
         self.exportedAt = exportedAt
         self.from = from
         self.end = end
         self.head = head
         self.rowCount = rowCount
         self.sessionCount = sessionCount
+        self.skipped = skipped
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        exportedAt = try container.decode(Date.self, forKey: .exportedAt)
+        from = try container.decode(Date.self, forKey: .from)
+        end = try container.decode(Date.self, forKey: .end)
+        head = try container.decodeIfPresent(ChainAnchor.self, forKey: .head)
+        rowCount = try container.decode(Int.self, forKey: .rowCount)
+        sessionCount = try container.decode(Int.self, forKey: .sessionCount)
+        skipped = try container.decodeIfPresent([ChainAnchor].self, forKey: .skipped) ?? []
     }
 }
 
@@ -108,18 +128,23 @@ public enum AuditExport {
         store: EventStore, from: Date, to end: Date, to directory: URL,
         mergeWindow: TimeInterval = SessionMerger.defaultWindow
     ) throws -> ExportManifest {
-        let timeRows = try store.chainedEvents(from: from, to: end)
-        // Backfill can append rows with older timestamps after newer ones, so the time-filtered
-        // set can skip ids; the verifier requires contiguity, so export the whole id span.
-        var rows = timeRows
-        if let first = timeRows.first, let last = timeRows.last {
-            rows = try store.chainedEvents(idsIn: first.id...last.id)
+        let rows = try store.chainedEvents(from: from, to: end)
+        // Backfill can append rows with older timestamps after newer ones, so the
+        // time-filtered set can skip ids inside its own span. The verifier requires the
+        // span contiguous, so the skipped rows go in the manifest — ids and hashes only,
+        // not contents: a shared export must not carry events outside the chosen range.
+        var skipped: [ChainAnchor] = []
+        if let first = rows.first, let last = rows.last {
+            let kept = Set(rows.map(\.id))
+            skipped = try store.chainedEvents(idsIn: first.id...last.id)
+                .filter { !kept.contains($0.id) }
+                .map { ChainAnchor(id: $0.id, hash: $0.hash) }
         }
         let hashes = Dictionary(rows.map { ($0.id, $0.hash) }, uniquingKeysWith: { first, _ in first })
         let sessions = SessionMerger.merge(try store.activations(from: from, to: end), window: mergeWindow)
         let manifest = ExportManifest(
             exportedAt: .now, from: from, end: end, head: rows.last.map { ChainAnchor(id: $0.id, hash: $0.hash) },
-            rowCount: rows.count, sessionCount: sessions.count)
+            rowCount: rows.count, sessionCount: sessions.count, skipped: skipped)
 
         try FileManager.default.createDirectory(
             at: directory, withIntermediateDirectories: true,
@@ -153,13 +178,16 @@ public enum AuditExport {
     }
 
     /// Recomputes the hash chain of an exported `raw_events.json` (the CSV files are not
-    /// verified) and checks the result against the manifest's head. Rows must be contiguous
-    /// (`id == previous + 1`), the first row's `prev_hash` must be the genesis value or — for a
-    /// partial export — the hash `anchors` recorded for the row before it, and every anchor the
+    /// verified) and checks the result against the manifest's head. Exported ids must be
+    /// contiguous apart from the `skipped` rows the manifest declares — the chain links
+    /// through those hashes — the first row's `prev_hash` must be the genesis value or, for a
+    /// partial export, the hash `anchors` recorded for the row before it, and every anchor the
     /// range provably covers must appear unchanged; the newest missing one reports as
     /// truncation. `anchors` are the `(day, anchor)` pairs from `anchors.log`. A day strictly
     /// inside the range is covered; a boundary day only when the manifest covers it whole, so a
-    /// partial-day export doesn't flag an anchor written later that day.
+    /// partial-day export doesn't flag an anchor written later that day; and an anchor is only
+    /// required from the first exported row on, so a carried-forward head earlier than the
+    /// export isn't counted missing.
     public static func verify(
         directory: URL,
         anchors: [(day: String, anchor: ChainAnchor)] = []
@@ -172,23 +200,9 @@ public enum AuditExport {
             [ExportedRow].self, from: Data(contentsOf: directory.appending(path: "raw_events.json")))
 
         let anchorsByID = Dictionary(anchors.map { ($0.anchor.id, $0.anchor.hash) }, uniquingKeysWith: { first, _ in first })
-        let dayFormatter = DateFormatter()
-        dayFormatter.dateFormat = "yyyy-MM-dd"
-        dayFormatter.timeZone = TimeZone(identifier: "UTC")
-        let firstDay = dayFormatter.string(from: manifest.from)
-        let lastDay = dayFormatter.string(from: manifest.end)
-        // An anchor is required when the export provably covers its row: a day strictly inside
-        // the range always qualifies; on a boundary day only when the manifest covers the whole
-        // day — a partial-day export legitimately misses an anchor written later that day.
-        let firstDayStart = dayFormatter.date(from: firstDay) ?? .distantPast
-        let lastDayEnd = dayFormatter.date(from: lastDay).map { $0 + 86399 } ?? .distantFuture
-        let coveredAnchors = anchors.filter { entry in
-            if entry.day > firstDay && entry.day < lastDay { return true }
-            if entry.day == firstDay && manifest.from <= firstDayStart { return true }
-            if entry.day == lastDay && manifest.end >= lastDayEnd { return true }
-            return false
-        }.map(\.anchor)
-        let rowIDs = Set(rows.map(\.id))
+        let covered = coveredAnchors(anchors, manifest: manifest, firstID: rows.first?.id ?? 0)
+        let skippedByID = Dictionary(
+            manifest.skipped.map { ($0.id, $0.hash) }, uniquingKeysWith: { first, _ in first })
         var problem: IntegrityProblem?
         if rows.count != manifest.rowCount {
             let atRow =
@@ -196,26 +210,80 @@ public enum AuditExport {
                 ? rows[manifest.rowCount].id : (rows.last?.id ?? 0) + 1
             problem = .countMismatch(found: rows.count, manifest: manifest.rowCount, atRow: atRow)
         }
-        var previous: ChainAnchor?
-        var verifiedRows = 0
-        for (index, row) in rows.enumerated() where problem == nil {
-            problem = check(row, at: index, after: previous, anchors: anchorsByID)
-            if problem == nil {
-                previous = ChainAnchor(id: row.id, hash: row.hash)
-                verifiedRows += 1
-            }
-        }
-        // The newest covered anchor whose row is missing reports as truncation. The check runs
-        // even on an empty export — clearing every row and the manifest must not pass — and is
-        // not bounded by the manifest's head, which a forgery lowers after deleting the tail.
+        let walk = problem == nil ? verifyChain(rows, skipped: skippedByID, anchors: anchorsByID) : ChainWalk()
+        problem = walk.problem
+        // The newest covered anchor whose row is missing reports as truncation; a skipped row
+        // is still present — the manifest carries its hash. The check runs even on an empty
+        // export — clearing every row and the manifest must not pass — and is not bounded by
+        // the manifest's head, which a forgery lowers after deleting the tail.
         if problem == nil {
-            let missing = coveredAnchors.filter { !rowIDs.contains($0.id) }.max { $0.id < $1.id }
+            let knownIDs = Set(rows.map(\.id)).union(skippedByID.keys)
+            let missing = covered.filter { !knownIDs.contains($0.id) }.max { $0.id < $1.id }
             if let missing {
                 problem = .anchorMismatch(missing)
             }
         }
-        let headMismatch = problem == nil && manifest.head != previous
-        return ExportReport(verifiedRows: verifiedRows, head: previous, problem: problem, headMismatch: headMismatch)
+        let headMismatch = problem == nil && manifest.head != walk.head
+        return ExportReport(verifiedRows: walk.verifiedRows, head: walk.head, problem: problem, headMismatch: headMismatch)
+    }
+
+    /// The anchors an export must contain: a day strictly inside the manifest's range always
+    /// qualifies; on a boundary day only when the manifest covers the whole day — a partial-day
+    /// export legitimately misses an anchor written later that day. An anchor is only required
+    /// from the first exported row on: a quiet day carries the previous head forward, so a
+    /// covered day can legitimately anchor a row the export starts after.
+    private static func coveredAnchors(
+        _ anchors: [(day: String, anchor: ChainAnchor)], manifest: ExportManifest, firstID: Int64
+    ) -> [ChainAnchor] {
+        let dayFormatter = DateFormatter()
+        dayFormatter.dateFormat = "yyyy-MM-dd"
+        dayFormatter.timeZone = TimeZone(identifier: "UTC")
+        let firstDay = dayFormatter.string(from: manifest.from)
+        let lastDay = dayFormatter.string(from: manifest.end)
+        let firstDayStart = dayFormatter.date(from: firstDay) ?? .distantPast
+        let lastDayEnd = dayFormatter.date(from: lastDay).map { $0 + 86399 } ?? .distantFuture
+        return anchors.filter { entry in
+            guard entry.anchor.id >= firstID else { return false }
+            if entry.day > firstDay && entry.day < lastDay { return true }
+            if entry.day == firstDay && manifest.from <= firstDayStart { return true }
+            if entry.day == lastDay && manifest.end >= lastDayEnd { return true }
+            return false
+        }.map(\.anchor)
+    }
+
+    /// The outcome of walking an export's chain.
+    private struct ChainWalk {
+        var problem: IntegrityProblem?
+        var head: ChainAnchor?
+        var verifiedRows = 0
+    }
+
+    /// Walks `rows` against the chain rules, stopping at the first problem. The chain links
+    /// through `skipped` rows the manifest declares — their hashes verify the link and can be
+    /// pinned by an anchor — so advance over them up to each row; a gap the manifest doesn't
+    /// declare stays a `missingRows` problem.
+    private static func verifyChain(
+        _ rows: [ExportedRow], skipped: [Int64: String], anchors: [Int64: String]
+    ) -> ChainWalk {
+        var walk = ChainWalk()
+        for (index, row) in rows.enumerated() {
+            while let last = walk.head, last.id + 1 < row.id, let skippedHash = skipped[last.id + 1] {
+                let skippedAnchor = ChainAnchor(id: last.id + 1, hash: skippedHash)
+                walk.head = skippedAnchor
+                if let pinned = anchors[skippedAnchor.id], pinned != skippedHash {
+                    walk.problem = .anchorMismatch(skippedAnchor)
+                    return walk
+                }
+            }
+            guard let problem = check(row, at: index, after: walk.head, anchors: anchors) else {
+                walk.head = ChainAnchor(id: row.id, hash: row.hash)
+                walk.verifiedRows += 1
+                continue
+            }
+            walk.problem = problem
+            return walk
+        }
+        return walk
     }
 
     /// The problem with `row`, or nil when it extends the chain cleanly. The first row must

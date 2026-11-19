@@ -162,6 +162,52 @@ private func relink(_ rows: inout [ExportedRow]) {
     #expect(!report.isIntact)
 }
 
+@Test func aBackfilledRowOutsideTheRangeIsSkippedNotLeaked() throws {
+    let temporary = try TemporaryStore()
+    let day = Date(timeIntervalSince1970: 1_800_000_000)
+    let recorder = try Recorder(store: temporary.store, startingAt: day)
+    let indicator = { (time: Date) in
+        LogEvent(
+            timestamp: time, message: "Active activity attributions changed to [\"scr:com.apple.Safari\"]",
+            entryID: UUID().uuidString)
+    }
+    try recorder.record(.indicator(indicator(day)))
+    // A late-arriving line gets a new id between the in-range rows but an older timestamp.
+    try recorder.record(
+        .unparsedTCC(
+            LogEvent(
+                timestamp: day - 86_400, message: "AUTHREQ_RESULT: garbage", entryID: UUID().uuidString)))
+    try recorder.record(.indicator(indicator(day.addingTimeInterval(10))))
+
+    let manifest = try AuditExport.write(
+        store: temporary.store, from: day - 3600, to: day + 3600, to: temporary.directory.appending(path: "export"))
+
+    #expect(manifest.rowCount == 2)
+    #expect(manifest.skipped.count == 1)
+    let rows = try JSONDecoder().decode(
+        [ExportedRow].self,
+        from: Data(contentsOf: temporary.directory.appending(path: "export/raw_events.json")))
+    #expect(!rows.contains(where: { $0.id == manifest.skipped[0].id }))
+    #expect(try AuditExport.verify(directory: temporary.directory.appending(path: "export")).isIntact)
+}
+
+@Test func anAnchorPointingBeforeTheExportDoesNotFlagIt() throws {
+    let (temporary, directory) = try recorded()
+    let rows = try temporary.rows("SELECT min(time_us) AS lo, max(time_us) AS hi FROM raw_events")
+    let midpoint = ((rows[0]["lo"] as Int64) + (rows[0]["hi"] as Int64)) / 2
+    let from = Date(timeIntervalSince1970: Double(midpoint) / 1_000_000)
+    try AuditExport.write(store: temporary.store, from: from, to: .distantFuture, to: directory)
+    let head = try #require(try temporary.store.head())
+    // A quiet day carries the previous head forward, so a covered day's anchor can point to a
+    // row before the first exported one.
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyy-MM-dd"
+    formatter.timeZone = TimeZone(identifier: "UTC")
+    let anchors = [(formatter.string(from: from.addingTimeInterval(86_400)), ChainAnchor(id: 1, hash: head.hash))]
+
+    #expect(try AuditExport.verify(directory: directory, anchors: anchors).isIntact)
+}
+
 @Test func aPartialDayExportDoesNotFlagALaterSameDayAnchor() throws {
     let (temporary, directory) = try recorded()
     let rows = try temporary.rows("SELECT min(time_us) AS lo, max(time_us) AS hi FROM raw_events")
