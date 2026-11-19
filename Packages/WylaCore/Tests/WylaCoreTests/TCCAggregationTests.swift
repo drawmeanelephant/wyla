@@ -8,12 +8,12 @@ private let main = "27.3-26C5035r"
 
 private func request(
     _ identifier: String? = "com.example.app", service: String = "kTCCServiceCamera", authValue: Int = 2,
-    messageID: String? = nil, at time: Date
+    messageID: String? = nil, at time: Date, entryID: String? = nil
 ) -> TCCRequest {
     TCCRequest(
         messageID: messageID ?? UUID().uuidString, time: time, service: service,
         responsible: identifier.map { TCCProcess(identifier: $0, pid: 1, binaryPath: nil) },
-        accessing: nil, requesting: nil, authValue: authValue)
+        accessing: nil, requesting: nil, authValue: authValue, entryID: entryID)
 }
 
 @Test func requestsAreCountedPerMinuteClientServiceAndResult() throws {
@@ -77,6 +77,20 @@ private func request(
             .map { $0["count"] as Int } == [1, 2])
 }
 
+@Test func aMigratedRequestClaimedByItsEntryIDCountsOnce() throws {
+    let temporary = try TemporaryStore()
+    let start = Date(timeIntervalSince1970: 1_800_000_000)
+    let recorder = try Recorder(store: temporary.store, startingAt: start)
+    // A request stored before entryIDs existed dedups on its wall time…
+    try recorder.record(.tccRequest(request(messageID: "1.2", at: start)))
+    // …and its `log stream` replay carries the entry's mach time and a wall time ~1 ms off.
+    try recorder.record(
+        .tccRequest(request(messageID: "1.2", at: start.addingTimeInterval(0.001), entryID: "mach-9")))
+    let rows = try temporary.rows("SELECT dedup_id FROM tcc_requests")
+    #expect(rows.map { $0["dedup_id"] as String } == ["mach-9"])
+    #expect(try temporary.rows("SELECT count FROM tcc_requests_agg").map { $0["count"] as Int } == [1])
+}
+
 @Test func requestsWithoutARawEventAreNotInTheChain() throws {
     let temporary = try TemporaryStore()
     let start = Date(timeIntervalSince1970: 1_800_000_000)
@@ -99,16 +113,6 @@ private func request(
     try recorder.record(
         .tccRequest(request(messageID: "1.2", at: start.addingTimeInterval(0.001), entryID: "mach-7")))
     #expect(try temporary.rows("SELECT count FROM tcc_requests_agg").map { $0["count"] as Int } == [1])
-}
-
-private func request(
-    _ identifier: String? = "com.example.app", service: String = "kTCCServiceCamera", authValue: Int = 2,
-    messageID: String? = nil, at time: Date, entryID: String? = nil
-) -> TCCRequest {
-    TCCRequest(
-        messageID: messageID ?? UUID().uuidString, time: time, service: service,
-        responsible: identifier.map { TCCProcess(identifier: $0, pid: 1, binaryPath: nil) },
-        accessing: nil, requesting: nil, authValue: authValue, entryID: entryID)
 }
 
 @Test func aRequestCompletedLateIsStillCounted() throws {
@@ -186,6 +190,36 @@ private func request(
     }
     #expect(requests.count == 2)
     #expect(counts.map { $0["count"] as Int } == [1, 1])
+}
+
+@Test func aDatabaseMigratedWithTheFirstV3GainsDedupID() throws {
+    // A database that ran the first pushed revision of v3 has tcc_requests keyed on
+    // (message_id, time_us); v4 rebuilds it with dedup_id so counting keeps working.
+    let directory = FileManager.default.temporaryDirectory
+        .appending(path: "wyla-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let url = directory.appending(path: "wyla.sqlite")
+    let queue = try DatabaseQueue(path: url.path(percentEncoded: false))
+    try Schema.migrator.migrate(queue, upTo: "v2")
+    try queue.write { db in
+        try db.execute(
+            sql: """
+                CREATE TABLE tcc_requests (
+                    message_id TEXT NOT NULL,
+                    time_us INTEGER NOT NULL,
+                    raw_event_id INTEGER REFERENCES raw_events(id),
+                    PRIMARY KEY (message_id, time_us)
+                ) WITHOUT ROWID;
+                INSERT INTO tcc_requests (message_id, time_us) VALUES ('1.2', 1800000000000000);
+                INSERT INTO grdb_migrations (identifier) VALUES ('v3');
+                """)
+    }
+    try Schema.migrator.migrate(queue)
+    let recorder = try Recorder(store: EventStore(url: url), startingAt: Date(timeIntervalSince1970: 1_800_000_000))
+    try recorder.record(.tccRequest(request(messageID: "3.4", at: Date(timeIntervalSince1970: 1_800_000_010))))
+    let rows = try queue.read { try Row.fetchAll($0, sql: "SELECT dedup_id FROM tcc_requests ORDER BY dedup_id") }
+    #expect(rows.count == 2)
 }
 
 @Test func dailyTotalsBucketMinutesByLocalDay() throws {
