@@ -21,8 +21,12 @@ final class AgentRegistration {
     /// Items the first time; until then the status is `requiresApproval`.
     func register() {
         // Tests launch the app from the build folder with `-WylaSkipAgentRegistration YES`, so
-        // that they don't register a launchd agent for that copy.
-        if service.status != .enabled, !UserDefaults.standard.bool(forKey: "WylaSkipAgentRegistration") {
+        // that they don't register a launchd agent for that copy. `launchAtLoginOptOut` is the
+        // Settings toggle's saved answer: turning launch at login off must stay off after a
+        // relaunch, so the automatic registration leaves an opted-out service alone.
+        let skipped = UserDefaults.standard.bool(forKey: "WylaSkipAgentRegistration")
+        let optedOut = UserDefaults.standard.bool(forKey: Self.launchAtLoginOptOut)
+        if service.status != .enabled, !skipped, !optedOut {
             do {
                 try service.register()
                 lastError = nil
@@ -34,8 +38,13 @@ final class AgentRegistration {
         refresh()
     }
 
+    /// The user default that records an explicit launch-at-login choice, so a disabled agent
+    /// is not re-registered on the next launch.
+    private static let launchAtLoginOptOut = "WylaLaunchAtLoginDisabled"
+
     /// Registers or unregisters the launchd agent, for the launch-at-login setting.
     func setEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(!enabled, forKey: Self.launchAtLoginOptOut)
         do {
             if enabled {
                 try service.register()

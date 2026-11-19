@@ -259,7 +259,7 @@ final class Store {
     /// Recomputes the hash chain and checks it against the latest exported anchor.
     func verifyIntegrity() throws -> IntegrityReport {
         guard let store else { throw StoreError.noDatabase }
-        return try store.verifyIntegrity(anchor: try AnchorLog.latest(from: AnchorLog.url(near: Self.databaseURL())))
+        return try store.verifyIntegrity(anchor: try AnchorLog.earliest(from: AnchorLog.url(near: Self.databaseURL())))
     }
 
     /// Writes the range's raw events and sessions into `directory`, as CSV and JSON.

@@ -295,6 +295,9 @@ public enum IntegrityProblem: Sendable, Equatable {
     /// The chain no longer contains the anchor row unchanged: rows were removed from the end, or
     /// the chain was rewritten from that row on.
     case anchorMismatch(ChainAnchor)
+    /// An export carries a different number of rows than its manifest records: rows were added
+    /// or removed after the export was written.
+    case countMismatch(found: Int, manifest: Int)
 
     /// The first row that failed, or for `missingRows` the first row after the gap.
     public var firstBadRow: Int64 {
@@ -302,6 +305,7 @@ public enum IntegrityProblem: Sendable, Equatable {
         case .missingRows(_, let next): next
         case .brokenLink(let id), .hashMismatch(let id): id
         case .anchorMismatch(let anchor): anchor.id
+        case .countMismatch(let found, let manifest): Int64(min(found, manifest) + 1)
         }
     }
 }

@@ -37,9 +37,16 @@ public enum AnchorLog {
         }
     }
 
-    /// The most recent saved anchor, for `verifyIntegrity(anchor:)`.
+    /// The most recent saved anchor, for display.
     public static func latest(from url: URL = AnchorLog.url()) throws -> ChainAnchor? {
         try read(from: url).last?.anchor
+    }
+
+    /// The oldest saved anchor, for `verifyIntegrity(anchor:)`. Verifying against the newest
+    /// would let a database rewrite be adopted silently by the next day's anchor; the oldest
+    /// can only stay valid while the chain still reaches back to it unchanged.
+    public static func earliest(from url: URL = AnchorLog.url()) throws -> ChainAnchor? {
+        try read(from: url).first?.anchor
     }
 
     private static let dayFormatter: DateFormatter = {

@@ -51,6 +51,9 @@ actor Collector {
     init(store: EventStore) throws {
         self.store = store
         recorder = try Recorder(store: store, startingAt: .now)
+        // Load now as well as on each heartbeat, or a restart would notify with defaults until
+        // the first heartbeat read the saved preferences.
+        settings = Settings.load(from: Settings.url(near: store.url))
     }
 
     func run() async {
