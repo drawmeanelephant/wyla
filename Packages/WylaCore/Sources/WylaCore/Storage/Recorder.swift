@@ -8,8 +8,9 @@ public enum RecorderInput: Sendable, Equatable {
     /// A completed TCC access check. Every request is counted in `tcc_requests_agg`; only one
     /// that links an activation to its responsible app also joins the hash chain as a raw event.
     case tccRequest(TCCRequest)
-    /// A TCC log line that looked like a request but didn't match a known format. Counted for
-    /// the Health view, not stored in the chain.
+    /// A TCC log line that looked like a request but didn't match a known format. It joins the
+    /// chain as a raw event so `unparsed_lines` counts each line once, dedup and backfill
+    /// included.
     case unparsedTCC(LogEvent)
     case hardware(HardwareChange)
 
