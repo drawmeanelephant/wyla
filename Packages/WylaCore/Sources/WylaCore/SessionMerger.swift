@@ -19,8 +19,10 @@ public struct Session: Sendable, Equatable {
     }
 
     /// Seconds from the session's start to its end, or to `now` while it is still running.
+    /// Clamped to zero: `now` is an estimate of when the agent died, and an activation can have
+    /// been recorded after the last heartbeat.
     public func duration(asOf now: Date) -> TimeInterval {
-        (end ?? now).timeIntervalSince(start)
+        max(start, end ?? now).timeIntervalSince(start)
     }
 
     /// The `raw_events` rows behind the session's activations.

@@ -136,3 +136,16 @@ private struct Recorded {
     try recorder.heartbeat(at: start.addingTimeInterval(30))
     #expect(try temporary.store.lastHeartbeat() == start.addingTimeInterval(30))
 }
+
+@Test func anOpenSessionNeverCountsTimeBeforeItStarted() throws {
+    // A dead agent can have recorded an activation after its last heartbeat, so `now` (the
+    // heartbeat) precedes the start. The session counts zero seconds, not a negative duration,
+    // and still matches a range covering its start.
+    let heartbeat = Date(timeIntervalSince1970: 1_800_000_000)
+    let session = SessionMerger.merge([Activation(sensor: .camera, client: "com.example", start: heartbeat.addingTimeInterval(10))])[0]
+    #expect(session.duration(asOf: heartbeat) == 0)
+    let inRange = SessionQuery(range: heartbeat..<heartbeat.addingTimeInterval(60))
+    #expect(inRange.matches(session, asOf: heartbeat))
+    let beforeStart = SessionQuery(range: heartbeat..<heartbeat.addingTimeInterval(5))
+    #expect(!beforeStart.matches(session, asOf: heartbeat))
+}

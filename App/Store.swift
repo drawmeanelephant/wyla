@@ -102,12 +102,11 @@ final class Store {
     }
 
     /// What "now" means to the viewer: the present while the agent runs, its last heartbeat once
-    /// it is dead, so a session it left open stops growing. Never earlier than the newest open
-    /// activation's start, which the agent recorded after that heartbeat.
+    /// it is dead, so a session it left open stops growing. A session that started after the last
+    /// heartbeat clamps itself to its own start instead of going negative or stretching the
+    /// sessions that were already open.
     var liveAsOf: Date {
-        if monitoringLive { return .now }
-        let lastStart = activations.filter { $0.end == nil }.map(\.start).max() ?? .distantPast
-        return max(lastHeartbeat ?? .now, lastStart)
+        monitoringLive ? .now : lastHeartbeat ?? .now
     }
 
     /// The activations still running, latest first. Empty when the agent is dead: the open

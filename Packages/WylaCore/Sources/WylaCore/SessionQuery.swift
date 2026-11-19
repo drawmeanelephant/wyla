@@ -24,7 +24,9 @@ public struct SessionQuery: Sendable, Equatable {
         if let sensor, session.sensor != sensor { return false }
         if let client, session.client != client { return false }
         if let range {
-            let sessionEnd = session.end ?? now
+            // Clamp like `Session.duration(asOf:)`: `now` can precede the session's start when it
+            // is a dead agent's last heartbeat.
+            let sessionEnd = max(session.start, session.end ?? now)
             guard session.start < range.upperBound, sessionEnd >= range.lowerBound else { return false }
         }
         let needle = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
