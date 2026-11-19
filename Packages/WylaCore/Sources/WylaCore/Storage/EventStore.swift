@@ -203,6 +203,26 @@ public final class EventStore: Sendable {
         }
     }
 
+    /// Every chained `raw_events` row with an id inside `range`, in chain order. Backfill can
+    /// append older timestamps after newer ones, so a time-filtered selection can be
+    /// discontiguous; an export takes the whole id span covering its range instead.
+    public func chainedEvents(idsIn range: ClosedRange<Int64>) throws -> [ExportedRow] {
+        try pool.read { db in
+            try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT id, time_us, source, message, dedup_key, prev_hash, hash
+                    FROM raw_events WHERE id BETWEEN ? AND ? ORDER BY id
+                    """,
+                arguments: [range.lowerBound, range.upperBound]
+            ).map {
+                ExportedRow(
+                    id: $0["id"], timeMicros: $0["time_us"], source: $0["source"], dedupKey: $0["dedup_key"],
+                    prevHash: $0["prev_hash"], hash: $0["hash"], message: $0["message"])
+            }
+        }
+    }
+
     /// How many activations of `client` on `sensor` are stored; `nil` counts unattributed use.
     /// The agent alerts on the first use of a sensor by an app: the count is one when the
     /// activation that just started is the first recorded.

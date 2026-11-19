@@ -149,6 +149,35 @@ private func relink(_ rows: inout [ExportedRow]) {
     #expect(!report.isIntact)
 }
 
+@Test func anEmptiedExportIsFlaggedByTheAnchor() throws {
+    let (temporary, directory) = try recorded()
+    try AuditExport.write(store: temporary.store, from: .distantPast, to: .distantFuture, to: directory)
+    let head = try #require(try temporary.store.head())
+    let anchors = [("2000-01-01", head)]
+
+    try rewriteExport(in: directory) { $0.removeAll() }
+
+    let report = try AuditExport.verify(directory: directory, anchors: anchors)
+    #expect(report.problem == .anchorMismatch(head))
+    #expect(!report.isIntact)
+}
+
+@Test func aPartialDayExportDoesNotFlagALaterSameDayAnchor() throws {
+    let (temporary, directory) = try recorded()
+    let rows = try temporary.rows("SELECT min(time_us) AS lo, max(time_us) AS hi FROM raw_events")
+    let midpoint = ((rows[0]["lo"] as Int64) + (rows[0]["hi"] as Int64)) / 2
+    let end = Date(timeIntervalSince1970: Double(midpoint) / 1_000_000)
+    try AuditExport.write(store: temporary.store, from: .distantPast, to: end, to: directory)
+    let head = try #require(try temporary.store.head())
+    // An anchor written the same UTC day but after the export's end is legitimately missing.
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyy-MM-dd"
+    formatter.timeZone = TimeZone(identifier: "UTC")
+    let anchors = [(formatter.string(from: end), head)]
+
+    #expect(try AuditExport.verify(directory: directory, anchors: anchors).isIntact)
+}
+
 @Test func aForgedFirstRowIsFlagged() throws {
     let (temporary, directory) = try recorded()
     try AuditExport.write(store: temporary.store, from: .distantPast, to: .distantFuture, to: directory)
