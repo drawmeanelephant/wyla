@@ -3,14 +3,15 @@ import SwiftUI
 @main
 struct WylaApp: App {
     @State private var registration: AgentRegistration
+    @State private var store: Store
 
     var body: some Scene {
         MenuBarExtra("WYLA", systemImage: "eye") {
-            MenuBarContent(registration: registration)
+            MenuBarContent(registration: registration, store: store)
         }
 
         Window("WYLA", id: MainWindow.id) {
-            MainWindow()
+            MainWindow(store: store)
         }
         .defaultLaunchBehavior(.suppressed)
     }
@@ -19,5 +20,6 @@ struct WylaApp: App {
         let registration = AgentRegistration()
         registration.register()
         _registration = State(initialValue: registration)
+        _store = State(initialValue: Store())
     }
 }

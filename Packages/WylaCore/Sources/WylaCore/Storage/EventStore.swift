@@ -32,10 +32,54 @@ public final class EventStore: Sendable {
         try Schema.migrator.migrate(pool)
     }
 
-    /// Every stored activation, oldest first.
-    public func activations() throws -> [Activation] {
+    /// Every stored activation, oldest first. With `from` or `to`, returns the activations that
+    /// overlap the range; open activations count as still running.
+    public func activations(from start: Date? = nil, to end: Date? = nil) throws -> [Activation] {
+        var sql = "SELECT * FROM activations"
+        var clauses: [String] = []
+        var arguments: [Int64] = []
+        if let start {
+            clauses.append("(end_us IS NULL OR end_us >= ?)")
+            arguments.append(start.microseconds)
+        }
+        if let end {
+            clauses.append("start_us <= ?")
+            arguments.append(end.microseconds)
+        }
+        if !clauses.isEmpty {
+            sql += " WHERE " + clauses.joined(separator: " AND ")
+        }
+        sql += " ORDER BY start_us, sensor, client"
+        return try pool.read { db in
+            try Row.fetchAll(db, sql: sql, arguments: StatementArguments(arguments)).map(Activation.init(row:))
+        }
+    }
+
+    /// The activations still running.
+    public func openActivations() throws -> [Activation] {
         try pool.read { db in
-            try Row.fetchAll(db, sql: "SELECT * FROM activations ORDER BY start_us, sensor, client").map(Activation.init(row:))
+            try Row.fetchAll(db, sql: "SELECT * FROM activations WHERE end_us IS NULL ORDER BY start_us, sensor, client")
+                .map(Activation.init(row:))
+        }
+    }
+
+    /// Every client and responsible app WYLA has seen.
+    public func apps() throws -> [StoredApp] {
+        try pool.read { db in
+            try Row.fetchAll(db, sql: "SELECT * FROM apps ORDER BY client").map(StoredApp.init(row:))
+        }
+    }
+
+    /// The raw events with the given ids, oldest first.
+    public func rawEvents(withIDs ids: [Int64]) throws -> [RawEvent] {
+        guard !ids.isEmpty else { return [] }
+        let placeholders = ids.map { _ in "?" }.joined(separator: ", ")
+        return try pool.read { db in
+            try Row.fetchAll(
+                db,
+                sql: "SELECT id, time_us, source, message FROM raw_events WHERE id IN (\(placeholders)) ORDER BY time_us, id",
+                arguments: StatementArguments(ids)
+            ).map(RawEvent.init(row:))
         }
     }
 
@@ -53,6 +97,14 @@ public final class EventStore: Sendable {
         try pool.read { db in
             try Int64.fetchOne(db, sql: "SELECT time_us FROM checkpoints WHERE source = ?", arguments: [source.rawValue])
                 .map(Date.init(microseconds:))
+        }
+    }
+
+    /// The last heartbeat the agent saved, or nil if it never ran. An old heartbeat means the
+    /// agent is dead, so the viewer doesn't treat the open activations it left behind as live.
+    public func lastHeartbeat() throws -> Date? {
+        try pool.read { db in
+            try Int64.fetchOne(db, sql: "SELECT max(last_heartbeat_us) FROM coverage").map(Date.init(microseconds:))
         }
     }
 

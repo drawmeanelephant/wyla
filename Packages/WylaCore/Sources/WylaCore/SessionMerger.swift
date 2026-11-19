@@ -17,24 +17,44 @@ public struct Session: Sendable, Equatable {
         var seen = Set<String>()
         return activations.compactMap(\.device).filter { seen.insert($0).inserted }
     }
+
+    /// Seconds from the session's start to its end, or to `now` while it is still running.
+    /// Clamped to zero: `now` is an estimate of when the agent died, and an activation can have
+    /// been recorded after the last heartbeat.
+    public func duration(asOf now: Date) -> TimeInterval {
+        max(start, end ?? now).timeIntervalSince(start)
+    }
+
+    /// The `raw_events` rows behind the session's activations.
+    public var eventIDs: [Int64] {
+        activations.flatMap { [$0.startEventID, $0.endEventID, $0.responsibleEventID] }.compactMap(\.self)
+    }
+
+    /// Identified by its first activation.
+    public var id: String { activations[0].id }
 }
+
+extension Session: Identifiable {}
 
 public enum SessionMerger {
     public static let defaultWindow: TimeInterval = 2
 
     /// Groups activations into sessions, sorted by start time.
     public static func merge(_ activations: [Activation], window: TimeInterval = defaultWindow) -> [Session] {
-        var groups: [ActivationKey: [[Activation]]] = [:]
+        // Flat session list plus each key's open session index, so appending doesn't copy the
+        // group's arrays on every activation.
+        var merged: [[Activation]] = []
+        var open: [ActivationKey: Int] = [:]
         for activation in activations.sorted(by: { $0.start < $1.start }) {
-            var sessions = groups[activation.key, default: []]
-            if let previousEnd = sessions.last?.last?.end, activation.start.timeIntervalSince(previousEnd) < window {
-                sessions[sessions.count - 1].append(activation)
+            let openEnd = open[activation.key].flatMap { merged[$0].last?.end }
+            if let index = open[activation.key], let previousEnd = openEnd, activation.start.timeIntervalSince(previousEnd) < window {
+                merged[index].append(activation)
             } else {
-                sessions.append([activation])
+                open[activation.key] = merged.count
+                merged.append([activation])
             }
-            groups[activation.key] = sessions
         }
-        return groups.values.joined().map(Session.init(activations:)).sorted {
+        return merged.map(Session.init(activations:)).sorted {
             ($0.start, $0.sensor.rawValue, $0.client ?? "") < ($1.start, $1.sensor.rawValue, $1.client ?? "")
         }
     }

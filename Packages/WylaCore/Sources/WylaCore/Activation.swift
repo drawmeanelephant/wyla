@@ -38,6 +38,12 @@ public struct Activation: Sendable, Equatable, Codable {
     public internal(set) var deviceUse: [String: TimeInterval] = [:]
     /// `deviceUse` covers the activation up to this time.
     var deviceUseCountedUntil: Date
+    /// The `raw_events` row that started the activation, set when it was loaded from the store.
+    public internal(set) var startEventID: Int64?
+    /// The `raw_events` row that ended it.
+    public internal(set) var endEventID: Int64?
+    /// The `raw_events` row that named its responsible app.
+    public internal(set) var responsibleEventID: Int64?
 
     public init(sensor: Sensor, client: String?, start: Date) {
         self.sensor = sensor
@@ -47,6 +53,9 @@ public struct Activation: Sendable, Equatable, Codable {
     }
 
     public var isAttributed: Bool { client != nil }
+
+    /// `(sensor, client, start)` is the stored unique key of an activation.
+    public var id: String { "\(sensor.rawValue)/\(client ?? "")/\(start.timeIntervalSince1970)" }
 
     /// The device that ran longest during the activation.
     public var device: String? {
@@ -65,3 +74,5 @@ public enum ActivationEvent: Sendable, Equatable {
     case started(Activation)
     case ended(Activation)
 }
+
+extension Activation: Identifiable {}

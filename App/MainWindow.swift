@@ -1,19 +1,25 @@
 import SwiftUI
-import WylaCore
 
 struct MainWindow: View {
     static let id = "main"
-
-    private var sensorList: String {
-        Sensor.allCases.map { $0.displayName.lowercased() }.formatted(.list(type: .or))
-    }
+    let store: Store
 
     var body: some View {
-        ContentUnavailableView {
-            Label("No activity recorded yet", systemImage: "eye.slash")
-        } description: {
-            Text("WYLA will log every app that uses your \(sensorList).")
+        if let error = store.loadError {
+            ContentUnavailableView {
+                Label("Could not read the log database", systemImage: "exclamationmark.triangle")
+            } description: {
+                Text(error)
+            }
+            .frame(minWidth: 640, minHeight: 400)
+        } else {
+            TabView {
+                TimelineView(store: store)
+                    .tabItem { Label("Timeline", systemImage: "list.bullet.rectangle") }
+                AppsView(store: store)
+                    .tabItem { Label("Apps", systemImage: "square.grid.2x2") }
+            }
+            .frame(minWidth: 760, minHeight: 480)
         }
-        .frame(minWidth: 640, minHeight: 400)
     }
 }

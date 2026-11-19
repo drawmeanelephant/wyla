@@ -35,7 +35,7 @@ extension LogLine {
             self = .banner
             return
         }
-        guard let raw = try? JSONDecoder().decode(RawEvent.self, from: Data(line.utf8)),
+        guard let raw = try? JSONDecoder().decode(StreamEntry.self, from: Data(line.utf8)),
             let timestamp = LogTimestamp.parse(raw.timestamp)
         else {
             self = .malformed
@@ -48,7 +48,7 @@ extension LogLine {
     }
 }
 
-private struct RawEvent: Decodable {
+private struct StreamEntry: Decodable {
     let timestamp: String
     let eventMessage: String
     let subsystem: String?
