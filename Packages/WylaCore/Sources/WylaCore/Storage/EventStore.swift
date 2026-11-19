@@ -120,7 +120,6 @@ public final class EventStore: Sendable {
         }
     }
 
-<<<<<<< HEAD
     /// One day's checks of one kind for the Requests history chart.
     public struct TCCDailyCount: Sendable, Equatable, Hashable {
         /// Start of the local day the checks were counted in.
