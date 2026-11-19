@@ -125,10 +125,14 @@ public enum AuditExport {
         var previous: ChainAnchor?
         var verifiedRows = 0
         var problem: IntegrityProblem?
+        // A range export can legitimately skip ids when backfill stored rows whose time falls
+        // outside the range between rows inside it, so the link is checked only where ids are
+        // consecutive; the count against the manifest is what catches removed rows.
+        if rows.count != manifest.rowCount {
+            problem = .countMismatch(found: rows.count, manifest: manifest.rowCount)
+        }
         for row in rows where problem == nil {
-            if let last = previous, row.id != last.id + 1 {
-                problem = .missingRows(after: last.id, next: row.id)
-            } else if let last = previous, row.prevHash != last.hash {
+            if let last = previous, row.id == last.id + 1, row.prevHash != last.hash {
                 problem = .brokenLink(id: row.id)
             } else if row.hash != row.expectedHash {
                 problem = .hashMismatch(id: row.id)

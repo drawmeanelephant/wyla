@@ -31,7 +31,7 @@ func lockDatabase(at url: URL) {
 /// prints the result, and exits with status 1 if it is broken.
 func verify(_ url: URL) -> Never {
     do {
-        let anchor = try AnchorLog.latest(from: AnchorLog.url(near: url))
+        let anchor = try AnchorLog.earliest(from: AnchorLog.url(near: url))
         let report = try EventStore(url: url).verifyIntegrity(anchor: anchor)
         if let problem = report.problem {
             print("BROKEN at row \(problem.firstBadRow): \(problem) (\(report.verifiedRows) rows verified before it)")

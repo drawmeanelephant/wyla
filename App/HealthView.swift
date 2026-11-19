@@ -107,8 +107,11 @@ struct HealthView: View {
         guard panel.runModal() == .OK, let directory = panel.url else { return }
         Task.detached(priority: .userInitiated) { [store] in
             do {
+                // The date picker leaves the time component of `exportTo` at whatever Date it
+                // started from; take the date through the end of its own day.
                 let manifest = try await store.export(
-                    from: exportFrom, to: exportTo.addingTimeInterval(86_400).addingTimeInterval(-1), into: directory)
+                    from: exportFrom,
+                    to: Calendar.current.startOfDay(for: exportTo).addingTimeInterval(86_399), into: directory)
                 await MainActor.run {
                     self.exported = "\(manifest.rowCount) events, \(manifest.sessionCount) sessions → \(directory.lastPathComponent)"
                 }
