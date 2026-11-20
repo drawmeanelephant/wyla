@@ -55,11 +55,12 @@ enum OnboardingWindow {
     static let doneKey = "WylaOnboardingDone"
 
     private static var window: NSWindow?
+    private static var closeObserver: (any NSObjectProtocol)?
 
-    /// Shows onboarding unless it already ran or the run opts out (tests pass
-    /// `-WylaOnboardingDone YES`, the same way they pass `-WylaSkipAgentRegistration YES`).
+    /// Shows onboarding unless it already ran, is already showing, or the run opts out (tests
+    /// pass `-WylaOnboardingDone YES`, the same way they pass `-WylaSkipAgentRegistration YES`).
     static func showIfFirstRun(registration: AgentRegistration) {
-        guard !UserDefaults.standard.bool(forKey: doneKey) else { return }
+        guard window == nil, !UserDefaults.standard.bool(forKey: doneKey) else { return }
         let view = OnboardingView(registration: registration) { close() }
         let window = NSWindow(contentViewController: NSHostingController(rootView: view))
         window.title = "Welcome to WYLA"
@@ -70,17 +71,23 @@ enum OnboardingWindow {
         window.makeKeyAndOrderFront(nil)
         self.window = window
         // Closing with the window's own button marks onboarding done the same as "Done".
-        NotificationCenter.default.addObserver(
+        closeObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification, object: window, queue: .main
         ) { _ in
-            UserDefaults.standard.set(true, forKey: doneKey)
+            MainActor.assumeIsolated { didClose() }
         }
     }
 
-    /// Closes the window and marks onboarding done — dismissing it counts as done either way.
+    /// Closes the window; `didClose` then marks onboarding done — dismissing it counts as done
+    /// either way.
     static func close() {
-        UserDefaults.standard.set(true, forKey: doneKey)
         window?.close()
+    }
+
+    private static func didClose() {
+        UserDefaults.standard.set(true, forKey: doneKey)
+        if let closeObserver { NotificationCenter.default.removeObserver(closeObserver) }
+        closeObserver = nil
         window = nil
     }
 }
