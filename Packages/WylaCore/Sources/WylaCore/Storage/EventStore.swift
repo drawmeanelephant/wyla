@@ -187,34 +187,32 @@ public final class EventStore: Sendable {
     /// Every chained `raw_events` column for the rows at or between `start` and `end`, in chain
     /// order: what an export carries so the chain can be verified without the database.
     public func chainedEvents(from start: Date, to end: Date) throws -> [ExportedRow] {
-        try pool.read { db in
-            try Row.fetchAll(
-                db,
-                sql: """
-                    SELECT id, time_us, source, message, dedup_key, prev_hash, hash
-                    FROM raw_events WHERE time_us BETWEEN ? AND ? ORDER BY id
-                    """,
-                arguments: [start.microseconds, end.microseconds]
-            ).map {
-                ExportedRow(
-                    id: $0["id"], timeMicros: $0["time_us"], source: $0["source"], dedupKey: $0["dedup_key"],
-                    prevHash: $0["prev_hash"], hash: $0["hash"], message: $0["message"])
-            }
-        }
+        try chainedEvents(where: .timeMicros, between: start.microseconds, and: end.microseconds)
     }
 
     /// Every chained `raw_events` row with an id inside `range`, in chain order. Backfill can
     /// append older timestamps after newer ones, so a time-filtered selection can be
     /// discontiguous; an export takes the whole id span covering its range instead.
     public func chainedEvents(idsIn range: ClosedRange<Int64>) throws -> [ExportedRow] {
+        try chainedEvents(where: .id, between: range.lowerBound, and: range.upperBound)
+    }
+
+    private enum ChainedEventsBound: String {
+        case id
+        case timeMicros = "time_us"
+    }
+
+    private func chainedEvents(
+        where column: ChainedEventsBound, between lower: Int64, and upper: Int64
+    ) throws -> [ExportedRow] {
         try pool.read { db in
             try Row.fetchAll(
                 db,
                 sql: """
                     SELECT id, time_us, source, message, dedup_key, prev_hash, hash
-                    FROM raw_events WHERE id BETWEEN ? AND ? ORDER BY id
+                    FROM raw_events WHERE \(column.rawValue) BETWEEN ? AND ? ORDER BY id
                     """,
-                arguments: [range.lowerBound, range.upperBound]
+                arguments: [lower, upper]
             ).map {
                 ExportedRow(
                     id: $0["id"], timeMicros: $0["time_us"], source: $0["source"], dedupKey: $0["dedup_key"],
