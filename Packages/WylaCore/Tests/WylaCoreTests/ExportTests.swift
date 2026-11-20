@@ -149,6 +149,44 @@ private func relink(_ rows: inout [ExportedRow]) {
     #expect(!report.isIntact)
 }
 
+/// The #20 forgery: cut the tail, relink, and lower the manifest's end below the cut so no
+/// anchor covers it. The files then match an honest shorter export; only the range the
+/// verifier expected exposes it.
+@Test func aCutExportWithALoweredEndIsFlaggedOnlyAgainstTheExpectedRange() throws {
+    let (temporary, directory) = try recorded()
+    let bounds = try temporary.rows("SELECT min(time_us) AS lo, max(time_us) AS hi FROM raw_events")
+    let date = { (micros: Int64) in Date(timeIntervalSince1970: Double(micros) / 1_000_000) }
+    let from = date(bounds[0]["lo"])
+    let end = date(bounds[0]["hi"])
+    let manifest = try AuditExport.write(store: temporary.store, from: from, to: end, to: directory)
+    let head = try #require(manifest.head)
+    let anchors = [("2999-01-01", head)]
+    #expect(try AuditExport.verify(directory: directory, anchors: anchors, expected: (from, end)).isIntact)
+
+    var cutEnd = from
+    try rewriteExport(in: directory) { rows in
+        rows.removeLast(rows.count / 2)
+        relink(&rows)
+        cutEnd = date(rows[rows.count - 1].timeMicros)
+    }
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let cut = try decoder.decode(ExportManifest.self, from: Data(contentsOf: directory.appending(path: "manifest.json")))
+    let lowered = ExportManifest(
+        exportedAt: cut.exportedAt, from: cut.from, end: cutEnd, head: cut.head, rowCount: cut.rowCount,
+        sessionCount: cut.sessionCount)
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    try encoder.encode(lowered).write(to: directory.appending(path: "manifest.json"))
+
+    let unchecked = try AuditExport.verify(directory: directory, anchors: anchors)
+    #expect(unchecked.isIntact)
+    #expect(unchecked.claimedEnd < end)
+    let checked = try AuditExport.verify(directory: directory, anchors: anchors, expected: (from, end))
+    #expect(checked.rangeShortfall)
+    #expect(!checked.isIntact)
+}
+
 @Test func anEmptiedExportIsFlaggedByTheAnchor() throws {
     let (temporary, directory) = try recorded()
     try AuditExport.write(store: temporary.store, from: .distantPast, to: .distantFuture, to: directory)
