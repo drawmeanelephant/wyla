@@ -55,24 +55,28 @@ private func exportDate(_ argument: String) -> (date: Date, isDay: Bool)? {
     return nil
 }
 
+/// Parses a `<from> <to>` pair of `exportDate`s. A bare `to` day means "through the end of that
+/// day"; an instant is used as given.
+private func exportRange(_ fromArgument: String, _ toArgument: String) -> (from: Date, end: Date)? {
+    guard let from = exportDate(fromArgument), let end = exportDate(toArgument) else { return nil }
+    return (from.date, end.isDay ? end.date.localDayEnd : end.date)
+}
+
 /// `--export <from> <to> <directory>` writes the date range's raw events and sessions as CSV and
-/// JSON into the directory, and `--verify-export <directory>` checks such an export's chain.
-/// Dates are `yyyy-MM-dd` (days in the local timezone; `to` includes that whole day) or ISO 8601.
+/// JSON into the directory. Dates are `yyyy-MM-dd` (days in the local timezone; `to` includes
+/// that whole day) or ISO 8601.
 func exportIfAsked(_ url: URL) {
     let arguments = CommandLine.arguments
     if let flag = arguments.firstIndex(of: "--export"), arguments.indices.contains(flag + 3) {
-        guard let from = exportDate(arguments[flag + 1]), let end = exportDate(arguments[flag + 2])
-        else {
+        guard let range = exportRange(arguments[flag + 1], arguments[flag + 2]) else {
             print("ERROR: dates are yyyy-MM-dd (local days) or ISO 8601 (for example 2026-11-19T12:30:00Z)")
             exit(EXIT_FAILURE)
         }
         do {
             let directory = URL(filePath: arguments[flag + 3])
-            // A bare day means "through the end of that day"; an instant is used as given.
-            let inclusiveEnd = end.isDay ? end.date.localDayEnd : end.date
             let settings = Settings.load(from: Settings.url(near: url))
             let manifest = try AuditExport.write(
-                store: EventStore(url: url), from: from.date, to: inclusiveEnd, to: directory,
+                store: EventStore(url: url), from: range.from, to: range.end, to: directory,
                 mergeWindow: settings.mergeWindow)
             let outside =
                 manifest.skipped.isEmpty
@@ -86,24 +90,46 @@ func exportIfAsked(_ url: URL) {
             exit(EXIT_FAILURE)
         }
     }
-    if let flag = arguments.firstIndex(of: "--verify-export"), arguments.indices.contains(flag + 1) {
-        do {
-            let anchors = try AnchorLog.read(from: AnchorLog.url(near: url))
-            let report = try AuditExport.verify(directory: URL(filePath: arguments[flag + 1]), anchors: anchors)
-            if let problem = report.problem {
-                print("BROKEN at row \(problem.firstBadRow): \(problem) (\(report.verifiedRows) rows verified before it)")
-                exit(EXIT_FAILURE)
-            }
-            if report.headMismatch {
-                print("BROKEN: the chain ends at a different head than the manifest records")
-                exit(EXIT_FAILURE)
-            }
-            print("OK: \(report.verifiedRows) rows")
-            exit(EXIT_SUCCESS)
-        } catch {
-            print("ERROR: \(error)")
+}
+
+/// `--verify-export <directory> [<from> <to>]` checks an export's chain and, given the range
+/// the export was asked for (dates as for `--export`), that its manifest still claims all of it.
+func verifyExportIfAsked(_ url: URL) {
+    let arguments = CommandLine.arguments
+    guard let flag = arguments.firstIndex(of: "--verify-export"), arguments.indices.contains(flag + 1) else { return }
+    var expected: (from: Date, end: Date)?
+    if arguments.indices.contains(flag + 2), !arguments[flag + 2].hasPrefix("--") {
+        guard arguments.indices.contains(flag + 3), let range = exportRange(arguments[flag + 2], arguments[flag + 3])
+        else {
+            print("ERROR: the expected range is <from> <to>, as yyyy-MM-dd (local days) or ISO 8601")
             exit(EXIT_FAILURE)
         }
+        expected = range
+    }
+    do {
+        let anchors = try AnchorLog.read(from: AnchorLog.url(near: url))
+        let report = try AuditExport.verify(
+            directory: URL(filePath: arguments[flag + 1]), anchors: anchors, expected: expected)
+        let claimed = "\(report.claimedFrom.ISO8601Format()) to \(report.claimedEnd.ISO8601Format())"
+        if let problem = report.problem {
+            print("BROKEN at row \(problem.firstBadRow): \(problem) (\(report.verifiedRows) rows verified before it)")
+            exit(EXIT_FAILURE)
+        }
+        if report.headMismatch {
+            print("BROKEN: the chain ends at a different head than the manifest records")
+            exit(EXIT_FAILURE)
+        }
+        if report.rangeShortfall {
+            print("BROKEN: the manifest claims \(claimed), less than the expected range; rows may have been cut")
+            exit(EXIT_FAILURE)
+        }
+        // Without an expected range, a cut-down export can't be told from an honest shorter
+        // one, so name the range the files vouch for.
+        print("OK: \(report.verifiedRows) rows, \(claimed)\(expected == nil ? " (as the manifest claims)" : "")")
+        exit(EXIT_SUCCESS)
+    } catch {
+        print("ERROR: \(error)")
+        exit(EXIT_FAILURE)
     }
 }
 
@@ -112,6 +138,7 @@ if CommandLine.arguments.contains("--verify") {
     verify(url)
 }
 exportIfAsked(url)
+verifyExportIfAsked(url)
 logger.notice("WylaAgent started (database \(url.path(percentEncoded: false), privacy: .private))")
 let collector: Collector
 do {

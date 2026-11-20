@@ -119,8 +119,15 @@ public struct ExportReport: Sendable, Equatable {
     public let problem: IntegrityProblem?
     /// The manifest's head and the verified head differ: rows were removed or rewritten.
     public let headMismatch: Bool
+    /// The range the manifest claims. Truncating an export and lowering its claimed end yields
+    /// files identical to an honest shorter export, so only a range known from outside the
+    /// export — passed to `verify` as `expected` — can tell the two apart.
+    public let claimedFrom: Date
+    public let claimedEnd: Date
+    /// `verify` was given an expected range and the manifest's claimed range doesn't cover it.
+    public let rangeShortfall: Bool
 
-    public var isIntact: Bool { problem == nil && !headMismatch }
+    public var isIntact: Bool { problem == nil && !headMismatch && !rangeShortfall }
 }
 
 /// Writes the raw events and sessions of a date range to a directory, as CSV and JSON, and
@@ -202,10 +209,13 @@ public enum AuditExport {
     /// inside the range is covered; a boundary day only when the manifest covers it whole, so a
     /// partial-day export doesn't flag an anchor written later that day; and an anchor is only
     /// required from the first exported row on, so a carried-forward head earlier than the
-    /// export isn't counted missing.
+    /// export isn't counted missing. With `expected`, the range the export was asked for, a
+    /// manifest claiming less of it reports `rangeShortfall`; the manifest stores whole seconds,
+    /// so the comparison does too.
     public static func verify(
         directory: URL,
-        anchors: [(day: String, anchor: ChainAnchor)] = []
+        anchors: [(day: String, anchor: ChainAnchor)] = [],
+        expected: (from: Date, end: Date)? = nil
     ) throws -> ExportReport {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
@@ -239,7 +249,14 @@ public enum AuditExport {
             }
         }
         let headMismatch = problem == nil && manifest.head != walk.head
-        return ExportReport(verifiedRows: walk.verifiedRows, head: walk.head, problem: problem, headMismatch: headMismatch)
+        let seconds = { (date: Date) in date.timeIntervalSince1970.rounded(.down) }
+        let rangeShortfall =
+            expected.map {
+                seconds(manifest.from) > seconds($0.from) || seconds(manifest.end) < seconds($0.end)
+            } ?? false
+        return ExportReport(
+            verifiedRows: walk.verifiedRows, head: walk.head, problem: problem, headMismatch: headMismatch,
+            claimedFrom: manifest.from, claimedEnd: manifest.end, rangeShortfall: rangeShortfall)
     }
 
     /// The anchors an export must contain. An anchor is written at its day's end, so a day is
