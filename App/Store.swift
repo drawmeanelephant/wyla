@@ -24,10 +24,15 @@ final class Store {
     private(set) var activations: [Activation] = []
     private(set) var sessions: [Session] = []
     private(set) var apps: [String: StoredApp] = [:]
+    private(set) var requests: [TCCSummary] = []
+    /// The shared settings, also read by the agent; the Settings tab edits them.
+    private(set) var settings: Settings
     /// Set when the database can't be opened or read.
     private(set) var loadError: String?
 
     private var store: EventStore?
+    /// Where the settings file lives: next to the database, so the agent reads the same file.
+    private let settingsURL: URL
     /// The agent's last heartbeat; a stale one means it died leaving activations open.
     private(set) var lastHeartbeat: Date?
     /// Whether the agent reported itself alive recently.
@@ -40,6 +45,7 @@ final class Store {
     /// One reload at a time; notifications that arrive while one runs fold into a single
     /// trailing reload, so heartbeat writes don't queue up merge work.
     private var reloadInFlight = false
+    private let alerts = Alerts()
     private var reloadPending = false
 
     /// The agent heartbeats every 30 s while idle and every 5 s while an activation is open, so a
@@ -55,6 +61,8 @@ final class Store {
     }
 
     init() {
+        settingsURL = Settings.url(near: Self.databaseURL())
+        settings = Settings.load(from: settingsURL)
         do {
             store = try EventStore(url: Self.databaseURL())
         } catch {
@@ -93,6 +101,7 @@ final class Store {
         let activations: [Activation]
         let sessions: [Session]
         let apps: [String: StoredApp]
+        let requests: [TCCSummary]
         let heartbeat: Date?
     }
 
@@ -113,14 +122,16 @@ final class Store {
             return
         }
         reloadInFlight = true
+        let mergeWindow = settings.mergeWindow
         Task.detached { [weak self] in
             let snapshot: Snapshot
             do {
                 let activations = try store.activations()
                 snapshot = Snapshot(
                     activations: activations,
-                    sessions: SessionMerger.merge(activations),
+                    sessions: SessionMerger.merge(activations, window: mergeWindow),
                     apps: Dictionary(try store.apps().map { ($0.client, $0) }, uniquingKeysWith: { first, _ in first }),
+                    requests: try store.tccRequestTotals(),
                     heartbeat: try store.lastHeartbeat())
             } catch {
                 await self?.finishReload(result: .failure(error))
@@ -137,8 +148,10 @@ final class Store {
             activations = snapshot.activations
             sessions = snapshot.sessions
             apps = snapshot.apps
+            requests = snapshot.requests
             lastHeartbeat = snapshot.heartbeat
             loadError = nil
+            alerts.report(on: snapshot.activations, settings: settings)
             refreshLiveness()
         case .failure(let error):
             loadError = error.localizedDescription
@@ -183,6 +196,15 @@ final class Store {
         return try store.rawEvents(withIDs: session.eventIDs)
     }
 
+    /// Per-day check totals for one client's service, for the Requests history chart; reads off
+    /// the main actor.
+    func requestDaily(client: String, service: String) async throws -> [EventStore.TCCDailyCount] {
+        guard let store else { return [] }
+        return try await Task.detached {
+            try store.tccRequestDaily(client: client, service: service)
+        }.value
+    }
+
     /// The name to show for a client: its `apps` name, the name the system log saw, or its
     /// bundle identifier or executable name.
     func name(of session: Session) -> String {
@@ -198,6 +220,74 @@ final class Store {
 
     func icon(of app: AppSummary) -> NSImage {
         Self.icon(for: app.client.flatMap { apps[$0] })
+    }
+
+    /// The name to show for a requesting client: its `apps` name when resolved, else the raw
+    /// identifier or "Unknown" when TCC named no process.
+    func name(of request: TCCSummary) -> String {
+        if request.client.isEmpty { return "Unknown" }
+        return apps[request.client]?.name ?? request.client
+    }
+
+    func icon(of request: TCCSummary) -> NSImage {
+        Self.icon(for: apps[request.client])
+    }
+
+    /// Saves the settings the Settings tab edited, next to the database where the agent reads
+    /// them, and re-merges the sessions when the merge window changed.
+    func updateSettings(_ edited: Settings) throws {
+        try edited.save(to: settingsURL)
+        settings = edited
+        sessions = SessionMerger.merge(activations, window: edited.mergeWindow)
+    }
+
+    /// What the Health tab shows: the collector's coverage and the log quality it left. Reads
+    /// off the main actor — the queries walk the whole database.
+    func health() async throws -> HealthInfo {
+        guard let store else { throw StoreError.noDatabase }
+        let dbURL = Self.databaseURL()
+        return try await Task.detached {
+            let coverage = try store.coverage()
+            var gaps: [(start: Date, end: Date)] = []
+            for index in coverage.indices.dropFirst() {
+                let previous = coverage[index - 1]
+                let current = coverage[index]
+                // A run the agent ended cleanly wasn't a monitoring loss — restarts don't count.
+                if !previous.endedCleanly, current.start > previous.end {
+                    gaps.append((previous.end, current.start))
+                }
+            }
+            return HealthInfo(
+                coverage: coverage.map { ($0.start, $0.end) }, gaps: gaps,
+                unparsedLines: try store.unparsedCount(),
+                lastAnchor: try AnchorLog.latest(from: AnchorLog.url(near: dbURL)))
+        }.value
+    }
+
+    /// Recomputes the hash chain off the main actor and checks it against every exported anchor;
+    /// the newest anchor whose row is missing reports as truncation.
+    func verifyIntegrity() async throws -> IntegrityReport {
+        guard let store else { throw StoreError.noDatabase }
+        let dbURL = Self.databaseURL()
+        return try await Task.detached {
+            let anchors = try AnchorLog.read(from: AnchorLog.url(near: dbURL)).map(\.anchor)
+            return try store.verifyIntegrity(anchors: anchors)
+        }.value
+    }
+
+    /// Writes the range's raw events and sessions into `directory` off the main actor, as CSV
+    /// and JSON, merged with the user's merge-window setting.
+    func export(from: Date, to end: Date, into directory: URL) async throws -> ExportManifest {
+        guard let store else { throw StoreError.noDatabase }
+        let mergeWindow = settings.mergeWindow
+        return try await Task.detached {
+            try AuditExport.write(store: store, from: from, to: end, to: directory, mergeWindow: mergeWindow)
+        }.value
+    }
+
+    enum StoreError: LocalizedError {
+        case noDatabase
+        var errorDescription: String? { "The log database is not open" }
     }
 
     /// The app's icon when its bundle resolves to the client, a generic app icon otherwise.
@@ -217,6 +307,18 @@ final class Store {
         guard let range = path.range(of: ".app", options: .backwards) else { return nil }
         return String(path[path.startIndex..<range.upperBound])
     }
+}
+
+/// The data behind the Health tab.
+struct HealthInfo {
+    /// Each agent run's monitored span, oldest first.
+    var coverage: [(start: Date, end: Date)]
+    /// Spans between runs when nothing was monitoring.
+    var gaps: [(start: Date, end: Date)]
+    /// Stored log lines the parser rejects.
+    var unparsedLines: Int
+    /// The newest chain head the agent exported, if anchor export is on.
+    var lastAnchor: ChainAnchor?
 }
 
 extension Sensor {

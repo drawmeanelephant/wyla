@@ -18,6 +18,10 @@ public struct TCCRequest: Sendable, Equatable, Codable {
     public let messageID: String
     /// The time of the `AUTHREQ_CTX` line.
     public let time: Date
+    /// The CTX entry's mach time. `log stream` and `log show` report the same entry with
+    /// wall-clock times about 1 ms apart but the same mach time, so this is the request's
+    /// stable dedup identity — `messageID` alone is reused across process restarts.
+    public let entryID: String?
     /// The TCC service, for example `kTCCServiceCamera`.
     public let service: String
     public let responsible: TCCProcess?
@@ -28,7 +32,7 @@ public struct TCCRequest: Sendable, Equatable, Codable {
 
     public init(
         messageID: String, time: Date, service: String, responsible: TCCProcess?, accessing: TCCProcess?, requesting: TCCProcess?,
-        authValue: Int
+        authValue: Int, entryID: String? = nil
     ) {
         self.messageID = messageID
         self.time = time
@@ -37,20 +41,18 @@ public struct TCCRequest: Sendable, Equatable, Codable {
         self.accessing = accessing
         self.requesting = requesting
         self.authValue = authValue
+        self.entryID = entryID
     }
 
-    public var sensor: Sensor? {
-        switch service {
-        case "kTCCServiceCamera": .camera
-        case "kTCCServiceMicrophone": .microphone
-        case "kTCCServiceScreenCapture": .screen
-        default: nil
-        }
-    }
+    public var sensor: Sensor? { Sensor(tccService: service) }
 
     /// The app TCC holds responsible. TCC omits `responsible` when a process is its own
     /// responsible process, and omits `accessing` when the app checks its own access.
     public var responsibleApp: TCCProcess? { responsible ?? accessing ?? requesting }
+
+    /// The request's dedup identity: the CTX entry's mach time when the log line carried one,
+    /// else the request's wall time in microseconds.
+    public var dedupID: String { entryID ?? String(time.microseconds) }
 }
 
 /// Joins the TCC `access` log lines of each request, keyed by `msgID`.
@@ -60,6 +62,7 @@ public struct TCCRequestAssembler: Sendable {
 
     private struct Pending: Sendable {
         let time: Date
+        let entryID: String?
         let service: String
         var chain: [String: TCCProcess] = [:]
     }
@@ -75,7 +78,8 @@ public struct TCCRequestAssembler: Sendable {
             guard let match = message.firstMatch(of: /^AUTHREQ_CTX: msgID=([^,]+), .*?service=(\w+)/) else {
                 return .unparsed(reason: "AUTHREQ_CTX line has an unknown format")
             }
-            pending[String(match.1)] = Pending(time: event.timestamp, service: String(match.2))
+            pending[String(match.1)] = Pending(
+                time: event.timestamp, entryID: event.entryID, service: String(match.2))
             return .ignored
         }
         if message.hasPrefix("AUTHREQ_ATTRIBUTION: ") {
@@ -103,7 +107,7 @@ public struct TCCRequestAssembler: Sendable {
             TCCRequest(
                 messageID: messageID, time: request.time, service: request.service,
                 responsible: request.chain["responsible"], accessing: request.chain["accessing"],
-                requesting: request.chain["requesting"], authValue: authValue))
+                requesting: request.chain["requesting"], authValue: authValue, entryID: request.entryID))
     }
 
     /// `responsible={TCCDProcess: identifier=…, pid=…, …, binary_path=…}, accessing={…}`

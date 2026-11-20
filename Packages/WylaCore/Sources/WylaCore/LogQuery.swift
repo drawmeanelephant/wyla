@@ -27,8 +27,6 @@ public enum LogQuery {
 /// Turns events from the combined `log` stream into recorder inputs.
 public struct LogRouter: Sendable {
     private var assembler = TCCRequestAssembler()
-    /// TCC lines that look relevant but don't match a known format, for the Health view.
-    public private(set) var unparsedTCCLines = 0
 
     public init() {}
 
@@ -40,9 +38,9 @@ public struct LogRouter: Sendable {
             switch assembler.consume(event) {
             case .event(let request): return .tccRequest(request)
             case .ignored: return nil
-            case .unparsed:
-                unparsedTCCLines += 1
-                return nil
+            // Lines that look relevant but don't match a known format are counted for the
+            // Health view, not stored in the chain.
+            case .unparsed: return .unparsedTCC(event)
             }
         default:
             return nil

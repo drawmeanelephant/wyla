@@ -55,4 +55,14 @@ extension Date {
     init(microseconds: Int64) {
         self.init(timeIntervalSince1970: Double(microseconds) / 1_000_000)
     }
+
+    /// The last representable instant of the local calendar day containing `self`: the next
+    /// day's local midnight minus a microsecond. A daylight-saving day is not 24 hours, so a
+    /// fixed `+ 86399` lands an hour early on fall-back days and an hour into the next day on
+    /// spring-forward days.
+    public var localDayEnd: Date {
+        Calendar.current
+            .date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: self))?
+            .addingTimeInterval(-0.000_001) ?? .distantFuture
+    }
 }

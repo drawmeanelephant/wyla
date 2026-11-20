@@ -35,6 +35,16 @@ make help        # every target
 
 `Wyla.xcodeproj` is generated from `project.yml` and is not committed. Run `make generate` after adding or moving files, or `make open` to generate and open it in Xcode.
 
+## Install
+
+```sh
+make install         # build Release and move WYLA into /Applications, then open it (needs an admin account)
+make uninstall       # stop the agent, unregister it, and remove WYLA from /Applications — keeps the log
+make uninstall-data  # also delete the recorded database, anchors.log, and settings
+```
+
+Reinstalling quits the running app, boots out the agent, and replaces the bundle atomically so no stale files merge into the new one; the new bundle's signature is verified before it opens. Uninstalling runs the app's `--unregister-agent` to drop the SMAppService registration before the bundle is removed. `make uninstall-data` deletes the whole data folder, including the chain anchors — the tamper evidence is gone with the log.
+
 ## Releases
 
 Pushing a `v*` tag builds the app and publishes `WYLA-<version>.zip` with a SHA-256 checksum on the [releases page](https://github.com/drawmeanelephant/wyla/releases). Builds are ad-hoc signed and not notarized, so Gatekeeper blocks the first launch. Allow it in System Settings > Privacy & Security.

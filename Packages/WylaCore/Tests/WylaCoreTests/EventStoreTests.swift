@@ -52,7 +52,24 @@ private func sha256(_ text: String) -> String {
     }
     var previous = String(repeating: "0", count: 64)
     let rows = try temporary.rows("SELECT * FROM raw_events ORDER BY id")
-    #expect(rows.count == 85)
+    // Indicators and hardware changes are chained; of the TCC requests only the ones that
+    // linked an activation to its responsible app are — the rest are counted, not stored.
+    let linked =
+        try temporary.rows(
+            "SELECT count(DISTINCT responsible_event_id) AS n FROM activations WHERE responsible_event_id IS NOT NULL"
+        )[0]["n"] as Int
+    let chainedTCC = try temporary.rows("SELECT count(*) AS n FROM raw_events WHERE source = 'tcc'")[0]["n"] as Int
+    let parser = IndicatorParser()
+    let nonTCC = try CaptureFixture("27.3-26C5035r").recorderInputs.filter {
+        switch $0 {
+        case .indicator(let event):
+            if case .ignored = parser.parse(event.message) { false } else { true }
+        case .hardware: true
+        case .tccRequest, .unparsedTCC: false
+        }
+    }.count
+    #expect(chainedTCC == linked)
+    #expect(rows.count == nonTCC + linked)
     for (index, row) in rows.enumerated() {
         let id: Int64 = row["id"]
         let time: Int64 = row["time_us"]
@@ -160,10 +177,10 @@ private func sha256(_ text: String) -> String {
     let unanchored = try temporary.store.verifyIntegrity()
     #expect(unanchored.isIntact)
     #expect(unanchored.head?.id == head.id - 3)
-    let anchored = try temporary.store.verifyIntegrity(anchor: head)
+    let anchored = try temporary.store.verifyIntegrity(anchors: [head])
     #expect(anchored.problem == .anchorMismatch(head))
     #expect(anchored.problem?.firstBadRow == head.id)
-    #expect(try temporary.store.verifyIntegrity(anchor: unanchored.head).isIntact)
+    #expect(try temporary.store.verifyIntegrity(anchors: unanchored.head.map { [$0] } ?? []).isIntact)
 }
 
 @Test func emptyStoreIsIntact() throws {
@@ -174,4 +191,15 @@ private func sha256(_ text: String) -> String {
     #expect(report.head == nil)
     #expect(try temporary.store.head() == nil)
     #expect(try temporary.store.checkpoint(for: .indicator) == nil)
+}
+
+@Test func aReplayedUnparsedTCCLineCountsOnce() throws {
+    let temporary = try TemporaryStore()
+    let start = Date(timeIntervalSince1970: 1_800_000_000)
+    let event = LogEvent(timestamp: start, message: "AUTHREQ_CTX: garbled", entryID: "abc.1")
+    let recorder = try Recorder(store: temporary.store, startingAt: start)
+    try recorder.record(.unparsedTCC(event))
+    // Backfill after a restart replays the same line; it must not count twice.
+    try recorder.record(.unparsedTCC(event))
+    #expect(try temporary.store.unparsedCount() == 1)
 }

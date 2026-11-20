@@ -5,15 +5,20 @@ import GRDB
 public enum RecorderInput: Sendable, Equatable {
     /// A Control Center `sensor-indicators` log line.
     case indicator(LogEvent)
-    /// A completed TCC access check. Only checks that link a command-line client to its
-    /// responsible app are stored.
+    /// A completed TCC access check. Every request is counted in `tcc_requests_agg`; only one
+    /// that links an activation to its responsible app also joins the hash chain as a raw event.
     case tccRequest(TCCRequest)
+    /// A TCC log line that looked like a request but didn't match a known format. It joins the
+    /// chain as a raw event so `unparsed_lines` counts each line once, dedup and backfill
+    /// included.
+    case unparsedTCC(LogEvent)
     case hardware(HardwareChange)
 
     public var time: Date {
         switch self {
         case .indicator(let event): event.timestamp
         case .tccRequest(let request): request.time
+        case .unparsedTCC(let event): event.timestamp
         case .hardware(let change): change.time
         }
     }
@@ -102,14 +107,30 @@ public final class Recorder {
             let raw = RawInput(source: .indicator, time: time, identity: event.entryID, message: event.message)
             switch parser.parse(event.message) {
             case .ignored: return []
-            // Unparsed lines are kept for the Health view and for audit.
-            case .unparsed: return try apply(raw, nil, at: time)
+            // Unparsed lines are kept for the Health view and for audit, and counted in
+            // `unparsed_lines` so the count doesn't re-parse every stored line.
+            case .unparsed:
+                return try apply(raw, nil, at: time) { db in try Self.countUnparsed(.indicator, in: db) }
             case .event(let indicator): return try apply(raw, .indicator(indicator, time: time), at: time)
             }
+        case .unparsedTCC(let event):
+            checkpoints[.tcc] = max(checkpoints[.tcc] ?? time, time)
+            // Kept as a raw event so a replayed line dedups: `apply` skips the side effect
+            // unless the append is new, which keeps `unparsed_lines` honest across backfill.
+            let raw = RawInput(source: .tcc, time: time, identity: event.entryID, message: event.message)
+            return try apply(raw, nil, at: time) { db in try Self.countUnparsed(.tcc, in: db) }
         case .tccRequest(let request):
             checkpoints[.tcc] = max(checkpoints[.tcc] ?? time, time)
+            // Requests are counted, not chained: `tcc_requests` dedups them by (messageID,
+            // entry's mach time) — the msgID is `pid.counter`, reused across restarts, and the
+            // wall time drifts ~1 ms between `log stream` and `log show`, so the mach time is
+            // the request's identity — and the per-minute totals grow from there. Only a
+            // request that later links an activation to its responsible app joins the hash
+            // chain, in `persist`.
             recentRequests.append(request)
-            return try apply(nil, .tccRequest(request), at: time)
+            return try apply(nil, .tccRequest(request), at: time) { db in
+                try Self.count(request, in: db)
+            }
         case .hardware(let change):
             return try apply(RawInput(source: .hardware, time: time, identity: nil, message: change.message), .hardware(change), at: time)
         }
@@ -163,8 +184,13 @@ public final class Recorder {
     }
 
     /// Stores the raw event if it is new, runs the builder, and stores the activation changes, all
-    /// in one transaction. The builder is updated only after the transaction commits.
-    private func apply(_ raw: RawInput?, _ input: BuilderInput?, at time: Date) throws -> [ActivationEvent] {
+    /// in one transaction. The builder is updated only after the transaction commits. `sideEffect`
+    /// adds derived data (the TCC per-minute totals) to the same transaction; with a raw input it
+    /// runs only when the raw event is new, without one it runs whenever there is work to write.
+    private func apply(
+        _ raw: RawInput?, _ input: BuilderInput?, at time: Date,
+        sideEffect: ((Database) throws -> Void)? = nil
+    ) throws -> [ActivationEvent] {
         var next = builder
         var events: [ActivationEvent] = []
         var stored: EventStore.Appended?
@@ -180,11 +206,15 @@ public final class Recorder {
                 guard appended.isNew else { return }
                 events = build()
                 try persist(events, currentEvent: (time.microseconds, appended.id), in: db)
+                try sideEffect?(db)
             }
         } else {
             events = build()
-            if !events.isEmpty {
-                try write { db in try persist(events, currentEvent: nil, in: db) }
+            if !events.isEmpty || sideEffect != nil {
+                try write { db in
+                    try persist(events, currentEvent: nil, in: db)
+                    try sideEffect?(db)
+                }
             }
         }
         if let stored {
@@ -219,7 +249,13 @@ public final class Recorder {
         }
     }
 
+    /// How far apart `log stream` and `log show` report the same entry's wall time at most;
+    /// the documented drift is about 1 ms.
+    private static let streamDriftMicros: Int64 = 10_000
+
     /// Stores the TCC request that `SessionBuilder` took the activation's responsible app from.
+    /// Only these requests join the hash chain: the rest live in `tcc_requests`/`tcc_requests_agg`
+    /// as dedup rows and totals. The dedup row recorded at count time gets its `raw_event_id` here.
     private func storeResponsibleRequest(of activation: Activation, in db: Database) throws -> Int64? {
         guard let responsible = activation.responsible,
             let request = recentRequests.last(where: {
@@ -227,7 +263,20 @@ public final class Recorder {
                     && activation.start.timeIntervalSince($0.time) <= SessionBuilder.responsibleMatchWindow
             })
         else { return nil }
-        return try EventStore.append(.tcc, time: request.time, identity: nil, message: try canonicalJSON(request), in: db).id
+        let storedID = try Int64.fetchOne(
+            db,
+            sql: "SELECT raw_event_id FROM tcc_requests WHERE message_id = ? AND dedup_id = ?",
+            arguments: [request.messageID, request.dedupID])
+        if let storedID { return storedID }
+        let appended = try EventStore.append(
+            .tcc, time: request.time, identity: nil, message: try canonicalJSON(request), in: db)
+        try db.execute(
+            sql: """
+                UPDATE tcc_requests SET raw_event_id = ?
+                WHERE message_id = ? AND dedup_id = ? AND raw_event_id IS NULL
+                """,
+            arguments: [appended.id, request.messageID, request.dedupID])
+        return appended.id
     }
 
     private func write(_ updates: (Database) throws -> Void) throws {
@@ -250,5 +299,86 @@ extension HardwareChange {
         let words = message.split(separator: " ", omittingEmptySubsequences: false)
         guard words.count >= 3, let sensor = Sensor(rawValue: String(words[0])), ["on", "off"].contains(words.last) else { return nil }
         self.init(time: time, sensor: sensor, device: words.dropFirst().dropLast().joined(separator: " "), isRunning: words.last == "on")
+    }
+}
+
+extension Recorder {
+
+    /// Counts the request in its one-minute bucket in `tcc_requests_agg`, deduplicated on
+    /// (message_id, dedup_id): the log's msgID is `pid.counter`, which a process restart or
+    /// reboot reuses, and its wall time drifts ~1 ms between `log stream` and `log show`, so
+    /// the CTX entry's mach time is the request's identity — its wall time when it has none.
+    /// The client is the app TCC held responsible, so the totals name the app behind the check
+    /// rather than a daemon such as `replayd` that made it on the app's behalf.
+    private static func count(_ request: TCCRequest, in db: Database) throws {
+        // Requests stored before entryIDs existed dedup on their wall time (`dedup_id` equals
+        // `time_us` as text). Claim such a row for the same request — same msgID, wall time
+        // within the stream/show drift — so its replay upgrades to the mach time instead of
+        // inserting a second row and counting twice. A replay that once missed the drift window
+        // can leave a wall-time twin next to the mach-time row: an update would collide with the
+        // existing primary key, so that twin is deleted instead, after its chain link moves to
+        // the surviving row.
+        if request.entryID != nil {
+            try db.execute(
+                sql: """
+                    UPDATE tcc_requests SET raw_event_id = (
+                        SELECT legacy.raw_event_id FROM tcc_requests legacy
+                        WHERE legacy.message_id = tcc_requests.message_id
+                        AND legacy.dedup_id = CAST(legacy.time_us AS TEXT)
+                        AND abs(legacy.time_us - ?) <= ? LIMIT 1)
+                    WHERE message_id = ? AND dedup_id = ? AND raw_event_id IS NULL
+                    """,
+                arguments: [request.time.microseconds, Self.streamDriftMicros, request.messageID, request.dedupID])
+            try db.execute(
+                sql: """
+                    DELETE FROM tcc_requests
+                    WHERE message_id = ? AND dedup_id = CAST(time_us AS TEXT) AND abs(time_us - ?) <= ?
+                    AND EXISTS (
+                        SELECT 1 FROM tcc_requests twin
+                        WHERE twin.message_id = tcc_requests.message_id AND twin.dedup_id = ?)
+                    """,
+                arguments: [request.messageID, request.time.microseconds, Self.streamDriftMicros, request.dedupID])
+            try db.execute(
+                sql: """
+                    UPDATE tcc_requests SET dedup_id = ?
+                    WHERE message_id = ? AND dedup_id = CAST(time_us AS TEXT)
+                    AND abs(time_us - ?) <= ?
+                    """,
+                arguments: [request.dedupID, request.messageID, request.time.microseconds, Self.streamDriftMicros])
+        }
+        try db.execute(
+            sql: """
+                INSERT OR IGNORE INTO tcc_requests (message_id, dedup_id, time_us, raw_event_id)
+                VALUES (?, ?, ?, NULL)
+                """,
+            arguments: [request.messageID, request.dedupID, request.time.microseconds])
+        guard db.changesCount > 0 else { return }
+        let minute = request.time.microseconds / 60_000_000 * 60_000_000
+        try db.execute(
+            sql: """
+                INSERT INTO tcc_requests_agg (minute_us, client, service, auth_value, count) VALUES (?, ?, ?, ?, 1)
+                ON CONFLICT (minute_us, client, service, auth_value) DO UPDATE SET count = count + 1
+                """,
+            arguments: [minute, request.responsibleApp?.identifier ?? "", request.service, request.authValue])
+    }
+
+    /// Marks this run as ended by the agent itself, so a gap to the next run's start is a
+    /// restart, not lost coverage. Called from `stop`; a crashed run's flag stays unset.
+    public func markRunEndedCleanly() throws {
+        try write { db in
+            try db.execute(
+                sql: "UPDATE coverage SET ended_cleanly = 1 WHERE id = ?", arguments: [runID])
+        }
+    }
+
+    /// Increments `unparsed_lines` for the source; the Health view reads it instead of
+    /// re-parsing every stored line.
+    private static func countUnparsed(_ source: RawEventSource, in db: Database) throws {
+        try db.execute(
+            sql: """
+                INSERT INTO unparsed_lines (source, count) VALUES (?, 1)
+                ON CONFLICT (source) DO UPDATE SET count = count + 1
+                """,
+            arguments: [source.rawValue])
     }
 }

@@ -43,12 +43,17 @@ actor Collector {
     private var resolvedApps: Set<String> = []
     private var notifiedWrites = -1
     private var appWrites = 0
+    /// The shared settings, reloaded on each heartbeat so the app's Settings tab applies.
+    private var settings = Settings()
     /// The longest time between a log event and its arrival on the live stream since the last heartbeat.
     private var maxLogDelay: TimeInterval = 0
 
     init(store: EventStore) throws {
         self.store = store
         recorder = try Recorder(store: store, startingAt: .now)
+        // Load now as well as on each heartbeat, or a restart would notify with defaults until
+        // the first heartbeat read the saved preferences.
+        settings = Settings.load(from: Settings.url(near: store.url))
     }
 
     func run() async {
@@ -76,6 +81,7 @@ actor Collector {
             }
         }
         perform { recorder -> [ActivationEvent] in
+            try recorder.markRunEndedCleanly()
             try recorder.heartbeat(at: .now)
             return []
         }
@@ -181,14 +187,23 @@ actor Collector {
                 logger.info(
                     """
                     Heartbeat: max log delay \(self.maxLogDelay, format: .fixed(precision: 2), privacy: .public) s, \
-                    late inputs \(self.recorder.lateInputs, privacy: .public), \
-                    unparsed TCC lines \(self.router.unparsedTCCLines, privacy: .public)
+                    late inputs \(self.recorder.lateInputs, privacy: .public)
                     """)
                 maxLogDelay = 0
             }
             perform { recorder -> [ActivationEvent] in
                 try recorder.heartbeat(at: .now)
                 return []
+            }
+            settings = Settings.load(from: Settings.url(near: store.url))
+            if settings.anchorExportEnabled, let head = try? store.head() {
+                do {
+                    if try AnchorLog.append(head: head, to: AnchorLog.url(near: store.url)) {
+                        logger.info("Exported chain head \(head.id, privacy: .public)")
+                    }
+                } catch {
+                    logger.error("Anchor export failed: \(String(describing: error), privacy: .public)")
+                }
             }
             notifyIfChanged()
         }

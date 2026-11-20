@@ -11,15 +11,22 @@ struct WylaApp: App {
         }
 
         Window("WYLA", id: MainWindow.id) {
-            MainWindow(store: store)
+            MainWindow(store: store, registration: registration)
         }
         .defaultLaunchBehavior(.suppressed)
     }
 
     init() {
+        // `scripts/uninstall.sh` calls this to drop the SMAppService registration while the
+        // bundle still exists; it exits without starting the UI.
+        if CommandLine.arguments.contains("--unregister-agent") {
+            AgentRegistration.unregister()
+            exit(EXIT_SUCCESS)
+        }
         let registration = AgentRegistration()
         registration.register()
         _registration = State(initialValue: registration)
         _store = State(initialValue: Store())
+        OnboardingWindow.showIfFirstRun(registration: registration)
     }
 }

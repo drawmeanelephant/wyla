@@ -32,8 +32,10 @@ private func hardware(_ seconds: TimeInterval, _ device: String = "Cam") -> Reco
     #expect(router.route(indicator) == .indicator(indicator))
     #expect(router.route(LogEvent(timestamp: base, message: "x", subsystem: "com.apple.other", category: "access")) == nil)
     #expect(router.route(tcc("AUTHREQ_CTX: msgID=1.2, function=f, service=kTCCServiceCamera, preflight=no")) == nil)
-    #expect(router.route(tcc("AUTHREQ_RESULT: garbage")) == nil)
-    #expect(router.unparsedTCCLines == 1)
+    guard case .unparsedTCC = router.route(tcc("AUTHREQ_RESULT: garbage")) else {
+        Issue.record("unparsed TCC line was not routed as unparsedTCC")
+        return
+    }
     guard case .tccRequest(let request) = router.route(tcc("AUTHREQ_RESULT: msgID=1.2, authValue=2, authReason=4")) else {
         Issue.record("completed request was not routed")
         return
